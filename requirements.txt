@@ -1,0 +1,21 @@
+# Whisper-Pinyin reference environment.
+# Requires Python >=3.8. The pinned CUDA stack below matches CUDA 11.8 + torch 2.0.0.
+
+--extra-index-url https://download.pytorch.org/whl/cu118
+-f https://k2-fsa.github.io/k2/installation/pre-compiled-cuda-wheels-linux/2.0.0.html
+
+torch==2.0.0+cu118
+torchaudio==2.0.1+cu118
+
+k2==1.24.4.dev20250304+cuda11.8.torch2.0.0
+transformers==4.46.3
+
+lhotse @git+https://github.com/lhotse-speech/lhotse
+
+kaldialign
+tiktoken
+numba
+lightning_utilities
+torchmetrics
+einops
+tensorboard

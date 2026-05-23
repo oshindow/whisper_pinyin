@@ -1,0 +1,11 @@
+name: whisper-pinyin
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+dependencies:
+  - python=3.8
+  - pip
+  - ffmpeg
+  - pip:
+      - -r requirements.txt

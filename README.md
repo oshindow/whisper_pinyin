@@ -1,110 +1,226 @@
-This is the official implementation of Whisper-Pinyin.
- 
-# Pre-trained models
+# Whisper-Pinyin
 
-The released checkpoints can be hosted on the Hugging Face Hub as model repositories. A recommended repository layout is:
+Official implementation of **Whisper-Pinyin**, a Mandarin pinyin-level speech model for ASR and mispronunciation diagnosis.
 
-```text
-whisper-pinyin/
-+-- README.md
-+-- config.py
-+-- checkpoint-epoch=0009.ckpt
-+-- data/
-|   +-- whisper/tokens.txt
-|   +-- lang_whisper/lexicon_add_plus_new.txt
-+-- inference_pinyin_ctc.py
-```
+This release is organized as an AISHELL-3-only open-source codebase:
 
-Suggested model variants:
+- use the AISHELL-3 training set for fine-tuning;
+- use the AISHELL-3 testing set for evaluation;
+- keep downloaded datasets, checkpoints, logs, and generated manifests outside git.
 
-| Model | Description | Checkpoint |
-| --- | --- | --- |
-| `whisper-pinyin-latic` | LATIC fine-tuned Whisper-Pinyin model | `exp2/whisper_pinyin_sys/001/checkpoint-epoch=0009.ckpt` |
-| `whisper-pinyin-magichub-sg` | Magichub-SG fine-tuned Whisper-Pinyin model | `exp2/whisper_pinyin_sys/005/checkpoint-epoch=0009.ckpt` |
-| `whisper-pinyin-multidomain` | Multi-domain Whisper-Pinyin model | `exp2/whisper_pinyin_sys/020/checkpoint-epoch=0004.ckpt` |
-
-Replace the checkpoint paths above with the final checkpoints you want to publish.
-
-# Environment
-
-Create and activate a Python environment:
+## Quick Start
 
 ```bash
-conda create -n whisper-pinyin python=3.10 -y
+git clone https://github.com/oshindow/whisper_pinyin.git
+cd whisper_pinyin
+
+conda env create -f environment.yml
+pip install pytorch-lightning==2.4.0 --no-deps
 conda activate whisper-pinyin
+
+python -c "import torch, torchaudio, k2; print(torch.__version__)"
 ```
 
-Install the core dependencies:
+The reference environment uses Python 3.8, CUDA 11.8, torch 2.0.0, k2, icefall, and lhotse. See `requirements.txt` for pinned package versions.
 
-```bash
-pip install torch torchaudio pytorch-lightning transformers openai-whisper gradio huggingface_hub
-```
-
-Install `k2` and `icefall` according to your CUDA and PyTorch versions. After installation, expose the local `icefall` package and shared libraries:
-
-```bash
-export PYTHONPATH=/path/to/icefall:$PYTHONPATH
-export LD_LIBRARY_PATH=/path/to/conda/envs/whisper-pinyin/lib:$LD_LIBRARY_PATH
-```
-
-The training and decoding scripts expect the following project resources:
+## Repository Layout
 
 ```text
-data/whisper/tokens.txt
-data/lang_whisper/lexicon_add_plus_new.txt
-dump2/*/train/text
-dump2/*/test/text
+config.py                                      Shared experiment defaults
+requirements.txt                              Python package versions
+environment.yml                               Conda environment
+utils.py                                      Metrics and helper functions
+graph_compiler.py                             CTC graph compiler
+otc_graph_compiler.py                         OTC graph compiler
+
+preprocessing/
+  preprocess.py                               Character-level dataset
+  preprocess_pinyin.py                        Whisper-Pinyin dataset
+  preprocess_pinyin_w2v.py                    Wav2Vec2 dataset
+
+scripts/
+  prepare_aishell3.py                         AISHELL-3 manifest builder
+
+scripts/baseline/
+  finetuning_pinyin_otc.py                    Baseline: OTC
+  finetuning_pinyin_w2v.py                    Baseline: Wav2Vec2
+  finetuning_pinyin_ctc_k2.py                 Baseline: CTC with k2
+  finetuning_pinyin_ctc_torch.py              Baseline: CTC with torch
+
+scripts/whisper_pinyin/
+  finetuning_pinyin_otc_cross_continuous.py
+  finetuning_pinyin_otc_cross_continuous_mellen.py
+  finetuning_pinyin_otc_cross_fsq_mellen.py
+
+scripts/annotator/
+  finetuning.py                               Character annotator
+  finetuning_pinyin.py                        Pinyin annotator
+
+inference/
+  inference_pinyin_ctc.py                     Whisper-Pinyin inference
+  inference_pinyin_ctc_w2v.py                 Wav2Vec2 inference
+  inference.py                                Character-level inference
+  inference_pinyin.py                         Pinyin decoder inference
+```
+ 
+
+## Data Preparation
+
+This repository already provides AISHELL-3 text manifests under:
+
+```text
+dump/aishell3/train/text
+dump/aishell3/val/text
+dump/aishell3/val/text_100
+dump/aishell3/test/text
 ```
 
-# Inference
+You only need to prepare the AISHELL-3 audio files. Convert all audio to 16 kHz, 16-bit, mono-channel WAV files and place them with the expected directory layout:
 
-Set the checkpoint path in `inference_pinyin_ctc.py`:
-
-```python
-model_path = "exp2/whisper_pinyin_sys/020/checkpoint-epoch=0004.ckpt"
+```text
+<data-root>/aishell3/
+  train/wav_16k/<speaker_id>/<utt_id>.wav
+  test/wav_16k/<speaker_id>/<utt_id>.wav
 ```
 
-Run inference:
+`dump/aishell3/val/text_100` is a 100-utterance validation subset randomly sampled from `dump/aishell3/val/text`.
+
+## Fine-Tuning
+
+Baseline Whisper-OTC:
 
 ```bash
-export PYTHONPATH=/path/to/icefall:$PYTHONPATH
-export LD_LIBRARY_PATH=/path/to/conda/envs/whisper-pinyin/lib:$LD_LIBRARY_PATH
-CUDA_VISIBLE_DEVICES=0 python3 inference_pinyin_ctc.py
-```
-
-For reproducible experiments, keep the tokenizer, pinyin token table, lexicon, and checkpoint from the same training run.
-
-# Fine-tuning
-
-Fine-tune an OTC-based Whisper-Pinyin model:
-
-```bash
-CUDA_VISIBLE_DEVICES=0 python3 -u finetuning_pinyin_otc_only.py \
+CUDA_VISIBLE_DEVICES=0 python scripts/baseline/finetuning_pinyin_otc.py \
   --epoch 10 \
-  --train-name "whisper_pinyin_multidomain" \
-  --train-id "001" \
-  --train-path "dump2/train_latic_sg_sichuan_coarse_format" \
-  --model-name "small" \
+  --data-root path/to/aishell3 \
+  --train-name whisper_pinyin_aishell3_otc \
+  --train-id 001 \
+  --exp-dir exp2 \
+  --train-path dump/aishell3/train/text \
+  --model-name small \
   --ctc-layers 2 \
   --n_mels 80 \
   --batch-size 6 \
-  --precision "bf16-mixed" \
+  --precision bf16-mixed \
   --learning-rate 1e-4 \
   --weight-decay 0.01 \
   --adam-epsilon 1e-8 \
-  --warmup-steps 20 \
-  --initial-bypass-weight -50 \
-  --initial-self-loop-weight 3.75
+  --warmup-steps 1000 > exp.log
 ```
 
-Checkpoints are written to:
+Baseline Wav2Vec2:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python scripts/baseline/finetuning_pinyin_w2v.py \
+  --epoch 10 \
+  --data-root path/to/aishell3 \
+  --train-name whisper_pinyin_aishell3_w2v \
+  --train-id 001 \
+  --exp-dir exp2 \
+  --train-path dump/aishell3/train/text \
+  --model-name small \
+  --ctc-layers 2 \
+  --n_mels 80 \
+  --batch-size 6 \
+  --precision bf16-mixed \
+  --learning-rate 1e-4 \
+  --weight-decay 0.01 \
+  --adam-epsilon 1e-8 \
+  --warmup-steps 1000 > exp_w2v.log
+```
+
+Whisper-Pinyin variants:
+
+Whisper-Pinyin OTC cross continuous:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python scripts/whisper_pinyin/finetuning_pinyin_otc_cross_continuous.py \
+  --epoch 10 \
+  --data-root path/to/aishell3 \
+  --train-name whisper_pinyin_aishell3_otc_cross_continuous \
+  --train-id 001 \
+  --exp-dir exp2 \
+  --train-path dump/aishell3/train/text \
+  --model-name small \
+  --ctc-layers 2 \
+  --n_mels 80 \
+  --batch-size 6 \
+  --precision bf16-mixed \
+  --learning-rate 1e-4 \
+  --weight-decay 0.01 \
+  --adam-epsilon 1e-8 \
+  --warmup-steps 1000 > exp_otc_cross_continuous.log
+```
+
+Whisper-Pinyin OTC cross continuous MELLEN:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python scripts/whisper_pinyin/finetuning_pinyin_otc_cross_continuous_mellen.py \
+  --epoch 10 \
+  --data-root path/to/aishell3 \
+  --train-name whisper_pinyin_aishell3_otc_cross_continuous_mellen \
+  --train-id 001 \
+  --exp-dir exp2 \
+  --train-path dump/aishell3/train/text \
+  --model-name small \
+  --ctc-layers 2 \
+  --n_mels 80 \
+  --batch-size 6 \
+  --precision bf16-mixed \
+  --learning-rate 1e-4 \
+  --weight-decay 0.01 \
+  --adam-epsilon 1e-8 \
+  --warmup-steps 1000 > exp_otc_cross_continuous_mellen.log
+```
+
+Whisper-Pinyin OTC cross FSQ MELLEN:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python scripts/whisper_pinyin/finetuning_pinyin_otc_cross_fsq_mellen.py \
+  --epoch 10 \
+  --data-root path/to/aishell3 \
+  --train-name whisper_pinyin_aishell3_otc_cross_fsq_mellen \
+  --train-id 001 \
+  --exp-dir exp2 \
+  --train-path dump/aishell3/train/text \
+  --model-name small \
+  --ctc-layers 2 \
+  --n_mels 80 \
+  --batch-size 6 \
+  --precision bf16-mixed \
+  --learning-rate 1e-4 \
+  --weight-decay 0.01 \
+  --adam-epsilon 1e-8 \
+  --warmup-steps 1000 > exp_otc_cross_fsq_mellen.log
+```
+
+Checkpoints are saved under:
 
 ```text
-/data1/xintong/whisper_otc/exp2/<train-name>/<train-id>/
+exp2/<train-name>/<train-id>/
 ```
 
-TensorBoard logs are written to:
+## Inference
 
-```text
-/data1/xintong/whisper_otc/exp2/<train-name>/logs/<train-id>/
+Run Whisper-Pinyin inference on the AISHELL-3 test manifest:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python inference/inference_pinyin_ctc.py \
+  --checkpoint path/to/your/checkpoint \
+  --test-path dump/aishell3/test/text \
+  --output results_aishell3_test.txt
 ```
+
+Run Wav2Vec2 baseline inference:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python inference/inference_pinyin_ctc_w2v.py \
+  --checkpoint path/to/your/checkpoint \
+  --test-path dump/aishell3/test/text \
+  --output results_w2v_aishell3_test.txt
+```
+  
+
+## Notes for Users
+
+- This project borrows and adapts a lot of code and ideas from [Whisper](https://github.com/openai/whisper), [k2](https://github.com/k2-fsa/k2), [icefall](https://github.com/k2-fsa/icefall), [SpeechBrain](https://github.com/speechbrain/speechbrain), and [FSQ](https://arxiv.org/abs/2309.15505). Please also follow the licenses and citation guidance of those upstream projects when using this repository.

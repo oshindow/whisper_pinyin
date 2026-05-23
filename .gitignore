@@ -9,7 +9,13 @@ thumbs.db
 .DS_Store
 .idea
 
-data/
+data/*
+!data/lang_whisper/
+data/lang_whisper/*
+!data/lang_whisper/lexicon_add_plus_new.txt
+!data/whisper/
+data/whisper/*
+!data/whisper/tokens.txt
 dump2/
 exp2/
 resources/

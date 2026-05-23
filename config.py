@@ -10,10 +10,11 @@ class Config:
     gradient_accumulation_steps = 1
     sample_rate = 16000
     token = 'text'
-    datasets = ['aishell3', 'latic', 'magichub', 'sichuan']
-    train_path = 'train_data_clean'
-    val_path = ['dump2/latic/test/' + token]
-    test_path = ['dump2/aishell3/test/' + token, 'dump2/latic/test/' + token, 'dump2/magichub/test/' + token, 'dump2/sichuan/test/' + token]
+    data_root = 'data'
+    datasets = ['aishell3']
+    train_path = 'dump/aishell3/train/' + token
+    val_path = 'dump/aishell3/val/' + token + '_100'
+    test_path = 'dump/aishell3/test/' + token
     spk_info_path = 'dump/aishell3/spk_info_only.txt'
     accent_classes = 3 # Number of accents (North + South + others)
     subsampling_factor = 2
@@ -38,5 +39,7 @@ class Config:
     vocab_size = 280
     pad_token_id = 0
     ctc_layers = 2
+    lexicon_path = 'data/lang_whisper/lexicon_add_plus_new.txt'
+    token_table_path = 'data/whisper/tokens.txt'
 
     

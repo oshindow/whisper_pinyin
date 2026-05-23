@@ -5,29 +5,37 @@ import torchaudio as ta
 import whisper
 import numpy as np
 import os
+from transformers import Wav2Vec2Model, Wav2Vec2Processor
 
-
-def get_data_lists(text_paths, task='train'):
+def get_data_lists(text_paths, task='train', data_root='data'):
 
     samples = []
     if task == 'train':
         with open(text_paths, 'r', encoding='utf-8-sig') as input:
             for line in input:
+                line = line.strip()
+                if not line:
+                    continue
+                if "|" not in line:
+                    uid, *tokens = line.split()
+                    spk = uid[:7]
+                    audio_path = os.path.join(data_root, "aishell3", task, "wav_16k", spk, f"{uid}.wav")
+                    samples.append("|".join([audio_path, " ".join(tokens)]))
+                    continue
                 if 'asr_chinese' in line:
                     line = line.replace('train', 'train/')
-                samples.append(line.strip())
-        
+                samples.append(line)
     return samples
 
-
-class WhisperPinyinDataset(torch.utils.data.Dataset):
+class W2vPinyinDataset(torch.utils.data.Dataset):
     def __init__(self, filelist_paths, tokenizer, spk_info_path, config, task='train', pseudo_labels=None, random_seed=1020):
         print(filelist_paths)
-        self.datalist = get_data_lists(filelist_paths, task=task)
+        data_root = getattr(config, "data_root", "data")
+        self.datalist = get_data_lists(filelist_paths, task=task, data_root=data_root)
         self.task = task
         self.tokenizer = tokenizer
         self.vocab = tokenizer.get_vocab()
-         
+
         self.pseudo_labels = pseudo_labels
         self.config = config
         random.seed(random_seed)
@@ -48,12 +56,12 @@ class WhisperPinyinDataset(torch.utils.data.Dataset):
         uid = audiofile.split('/')[-1][:-4]
          
         ids = self.tokenizer.encode(texts)[:-1]
-
+        
         if self.pseudo_labels and uid in self.pseudo_labels:
             labels = self.pseudo_labels[uid]
         else:
             labels = ids[1:] + [self.tokenizer.eos_token_id]
- 
+
           
         if not os.path.isfile(audiofile):
             part = audiofile.split('/')[5]  
@@ -80,18 +88,17 @@ class WhisperPinyinDataset(torch.utils.data.Dataset):
         if sr != 16000:
             resampler = ta.transforms.Resample(sr, 16000)
             audio = resampler(audio)
-       
+             
+        
         duration = audio.shape[-1] / 16000
         mel_lens = min(round(audio.shape[-1] / 160 + 0.5), 1500)
         
-        audio = whisper.pad_or_trim(audio.flatten())
-        mel = whisper.log_mel_spectrogram(audio, n_mels=self.config.n_mels) # torch.Size([128, 3000])
-        
+        inputs = audio.squeeze().numpy()  # Tensor (T,)
         return {
             "durations": duration,
             "mel_lens": mel_lens,
             "uids": audiofile,
-            "input_ids": mel,
+            "input_ids": inputs,
             "labels": labels,
             "dec_input_ids": ids,
             "pinyins": texts,
@@ -101,7 +108,12 @@ class WhisperPinyinDataset(torch.utils.data.Dataset):
     def __len__(self):
         return len(self.datalist)
 
-class WhisperDataCollatorWhithPadding:
+class W2vDataCollatorWhithPadding:
+    def __init__(self):
+        self.processor = Wav2Vec2Processor.from_pretrained(
+            "facebook/wav2vec2-base"
+        )
+        
     def __call__(self, features):
         durations, uids, input_ids, labels, dec_input_ids, pinyins, mel_lens = [], [], [], [], [], [], [] 
         for f in features:
@@ -112,16 +124,31 @@ class WhisperDataCollatorWhithPadding:
             dec_input_ids.append(f["dec_input_ids"])
             pinyins.append(f["pinyins"])
             mel_lens.append(f["mel_lens"])
-
-        input_ids = torch.concat([input_id[None, :] for input_id in input_ids])
         
+
         label_lengths = [len(lab) for lab in labels]
         dec_input_ids_length = [len(e) for e in dec_input_ids]
         max_label_len = max(label_lengths+dec_input_ids_length)
         
         labels = [np.pad(lab, (0, max_label_len - lab_len), 'constant', constant_values=-100) for lab, lab_len in zip(labels, label_lengths)]
         dec_input_ids = [np.pad(e, (0, max_label_len - e_len), 'constant', constant_values=50257) for e, e_len in zip(dec_input_ids, dec_input_ids_length)] # 50257 is eot token id
-         
+        
+        output = self.processor.feature_extractor(
+            input_ids,
+            padding=True,
+            sampling_rate=16000,
+            return_tensors="pt",
+            return_attention_mask=True
+        )
+        # print(output)
+        # print(self.processor.feature_extractor.return_attention_mask)
+        # ["input_values"].squeeze(0)  # Tensor (T,)
+        # print(output["input_values"].shape, output["input_values"])
+        # print(output["attention_mask"].shape, output["attention_mask"])
+        input_ids = output["input_values"]
+        attentin_mask = output["attention_mask"]
+        mel_lens = output["input_values"].shape[0]
+
         batch = {
             "labels": labels,
             "dec_input_ids": dec_input_ids
@@ -129,6 +156,7 @@ class WhisperDataCollatorWhithPadding:
 
         batch = {k: torch.tensor(np.array(v), requires_grad=False) for k, v in batch.items()}
         batch["input_ids"] = input_ids
+        batch["attention_mask"] = attentin_mask
         batch["uids"] = uids
         batch["durations"] = durations
         batch["pinyins"] = pinyins

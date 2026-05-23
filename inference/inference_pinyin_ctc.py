@@ -1,14 +1,18 @@
-import os
-import torch
+from pathlib import Path
+import sys
 
-from preprocess_pinyin import WhisperPinyinDataset, WhisperDataCollatorWhithPadding
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+import torch
+import argparse
+
+from preprocessing.preprocess_pinyin import WhisperPinyinDataset, WhisperDataCollatorWhithPadding
 from transformers import WhisperTokenizer
 import whisper
 
 from utils import error_stats
 from config import Config
-from pathlib import Path
-
 import k2
 
 def ctc_decode(logits, pinyins):
@@ -32,9 +36,6 @@ def ctc_decode(logits, pinyins):
         idx += 1
     return texts
 
-import torch
-
-
 def get_lexicon(lexicon_path):
     lexicon = {}
     with open(lexicon_path, 'r', encoding='utf-8') as f:
@@ -46,23 +47,28 @@ def get_lexicon(lexicon_path):
     return lexicon 
 
 
-model_path = 'exp2/whisper_pinyin_cross_ratio_random/001/checkpoint-epoch=0009.ckpt' # whisper-OTC
- 
-test_paths = ["resources/whisAID/magichub_sg/test_unseen_sorted.csv", "resources/whisAID/magichub_sg/test_seen_sorted.csv",
-              "resources/whisAID/latic/test_unseen_sorted.csv", "resources/whisAID/latic/test_seen_sorted.csv"]
-for test_path in test_paths:
-    Config.test_path = test_path
-    dataset = test_path.split('/')[-2]
-    error_file = open(f'errorfile_w2v_e9_{dataset}_{os.path.basename(test_path).split(".")[0]}', 'w', encoding='utf8')
-    model = whisper.load_model(model_path, ctc_vocab=280, ctc_layers=2) # 296
-    print(model_path)
-    spk_info_path = 'dump/aishell3/spk_info_only.txt'
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--checkpoint", default="hf_model/checkpoint-epoch=0009.ckpt")
+    parser.add_argument("--test-path", default=Config.test_path)
+    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--output", default="errorfile_aishell3_test")
+    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    args = parser.parse_args()
+
+    Config.test_path = args.test_path
+    error_file = open(args.output, 'w', encoding='utf8')
+    model = whisper.load_model(args.checkpoint, ctc_vocab=Config.vocab_size, ctc_layers=Config.ctc_layers)
+    model = model.to(args.device)
+    model.eval()
+    print(args.checkpoint)
+    spk_info_path = Config.spk_info_path
     tokenizer = WhisperTokenizer.from_pretrained("openai/whisper-large-v3-turbo", language="zh", task="transcribe")
     test_dataset = WhisperPinyinDataset(Config.test_path, tokenizer, spk_info_path, Config, task='train')
-    test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=64, collate_fn=WhisperDataCollatorWhithPadding())
+    test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=args.batch_size, collate_fn=WhisperDataCollatorWhithPadding())
     
-    token_table_tight = k2.SymbolTable.from_file(Path('data/whisper') / "tokens.txt")
-    lexicon = get_lexicon(lexicon_path='data/lang_whisper/lexicon_add_plus_new.txt')
+    token_table_tight = k2.SymbolTable.from_file(Config.token_table_path)
+    lexicon = get_lexicon(lexicon_path=Config.lexicon_path)
     cer_results = []
  
     print(len(test_loader))
@@ -74,7 +80,7 @@ for test_path in test_paths:
 
       
         with torch.no_grad():
-            audio_features,_ = model.encoder(b["input_ids"].cuda())
+            audio_features,_ = model.encoder(b["input_ids"].to(args.device))
             _, nnet_output = model.ctc_head(audio_features)
             texts = ctc_decode(nnet_output, b["pinyins"])
             

@@ -1,12 +1,15 @@
- 
+from pathlib import Path
+import sys
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+
 import torch
 import torch.nn as nn
 import whisper
 from lhotse.dataset import SpecAugment
-from pathlib import Path
 from utils import error_stats, time_warp, make_pad_mask
-from preprocess_pinyin import WhisperPinyinDataset, WhisperDataCollatorWhithPadding
-import pytorch_lightning as pl
+from preprocessing.preprocess_pinyin import WhisperPinyinDataset, WhisperDataCollatorWhithPadding
 from pytorch_lightning import LightningModule
 from pytorch_lightning import Trainer, seed_everything
 from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
@@ -27,7 +30,7 @@ from otc_graph_compiler import OtcTrainingGraphCompiler
 import random
 import numpy as np
 import argparse
-from fsq import FSQ
+from scripts.whisper_pinyin.fsq import FSQ
 
 
 def set_seed(seed):
@@ -372,7 +375,7 @@ class WhisperModelModule(LightningModule):
                           )
 
     def val_dataloader(self):
-        dataset = WhisperPinyinDataset(self.val_path, self.tokenizer, self.spk_info_path, config=self.cfg, task='dev')
+        dataset = WhisperPinyinDataset(self.val_path, self.tokenizer, self.spk_info_path, config=self.cfg, task='test')
         return torch.utils.data.DataLoader(dataset, 
                           batch_size=self.cfg.batch_size, 
                           num_workers=self.cfg.num_worker,
@@ -392,32 +395,32 @@ if __name__ == '__main__':
         "--train-name",
         type=str,
         default="whisper_small_ctc_k2_otc",
-        help="Supervision manifest that contains verbatim transcript",
+        help="Experiment name used to group checkpoints and TensorBoard logs.",
     )
     parser.add_argument(
         "--train-id",
         type=str,
         default="001",
-        help="Supervision manifest that contains verbatim transcript",
+        help="Run identifier used as the subdirectory under the experiment name.",
     )
     parser.add_argument(
         "--epoch",
         type=int,
         default=10,
-        help="Supervision manifest that contains verbatim transcript",
+        help="Number of training epochs.",
     )
 
     parser.add_argument(
         "--initial-bypass-weight",
         type=int,
         default=-19,
-        help="",
+        help="Initial log weight for OTC bypass arcs in the training graph.",
     )
     parser.add_argument(
         "--initial-self-loop-weight",
         type=float,
         default=3.75,
-        help="",
+        help="Initial log weight for OTC self-loop arcs in the training graph.",
     )
     parser.add_argument(
         "--batch-size",
@@ -429,7 +432,13 @@ if __name__ == '__main__':
         "--train-path",
         type=str,
         default="train_data_clean_sub0.04_ins0.03_del0.03",
-        help="Batch size for training",
+        help="Path to the training manifest in audio_path|pinyin format.",
+    )
+    parser.add_argument(
+        "--data-root",
+        type=str,
+        default="data",
+        help="Root directory used to resolve AISHELL-3 audio paths when manifests contain utterance IDs.",
     )
     parser.add_argument(
         "--model-name",
@@ -447,7 +456,7 @@ if __name__ == '__main__':
         "--ctc-layers",
         type=int,
         default=2,
-        help="",
+        help="Number of transformer layers used by the CTC/OTC prediction head.",
     )
     parser.add_argument(
         "--precision",
@@ -480,28 +489,34 @@ if __name__ == '__main__':
         help="Number of warmup steps for the learning rate scheduler",
     )
     parser.add_argument(
+        "--exp-dir",
+        type=str,
+        default="exp2",
+        help="Root directory for checkpoints and TensorBoard logs",
+    )
+    parser.add_argument(
         "--time-mask-ratio",
         type=float,
         default=2.5,
-        help="Number of mel frequency bins",
+        help="Ratio controlling the amount of time masking used for consistency regularization.",
     )
     parser.add_argument(
         "--cr-loss-scale",
         type=float,
         default=0.02,
-        help="Number of mel frequency bins",
+        help="Loss weight for the consistency regularization term.",
     )
     parser.add_argument(
         "--index-ratio",
         type=float,
         default=0.1,
-        help="Number of mel frequency bins",
+        help="Fraction of frame indices sampled for the cross-frame FSQ consistency objective.",
     )
     parser.add_argument(
         "--sim-loss-scale",
         type=float,
         default=0.01,
-        help="Number of mel frequency bins",
+        help="Loss weight for the FSQ similarity regularization term.",
     )
 
     args = parser.parse_args()
@@ -511,8 +526,8 @@ if __name__ == '__main__':
   
     lang = "zh"
     
-    log_output_dir = "exp2/" + train_name
-    check_output_dir = "exp2/" + train_name + '/' + train_id
+    log_output_dir = Path(args.exp_dir) / train_name
+    check_output_dir = Path(args.exp_dir) / train_name / train_id
     print("train-path:", args.train_path)
     print("check_output_dir:", check_output_dir)
 
@@ -525,6 +540,7 @@ if __name__ == '__main__':
     cfg.initial_self_loop_weight = args.initial_self_loop_weight
     cfg.batch_size = args.batch_size
     cfg.train_path = args.train_path
+    cfg.data_root = args.data_root
     cfg.n_mels = args.n_mels
     cfg.ctc_layers = args.ctc_layers
     cfg.learning_rate = args.learning_rate
@@ -570,5 +586,3 @@ if __name__ == '__main__':
     )
 
     trainer.fit(model)
-
-
