@@ -1,0 +1,9 @@
+MIT License
+
+Copyright (c) 2022 OpenAI
+
+This notice applies to code adapted from OpenAI Whisper:
+https://github.com/openai/whisper
+
+The canonical license text is available at:
+https://github.com/openai/whisper/blob/main/LICENSE

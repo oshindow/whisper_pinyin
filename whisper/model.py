@@ -21,8 +21,6 @@ except (ImportError, RuntimeError, OSError):
     scaled_dot_product_attention = None
     SDPA_AVAILABLE = False
 
-from .classifier import ReversalClassifier
-
 class PredHead(nn.Module): #Add commentMore actions
     """Custom CTC head for ASR."""
 
@@ -455,14 +453,6 @@ class Whisper(nn.Module):
             self.dims.n_audio_state  # Map back to original dimension
         )
         ###
-        self.spk_grl = ReversalClassifier(
-                            input_dim=768,
-                            hidden_dim=256,
-                            output_dim=368,
-                            gradient_clipping_bounds=1.0)
-        
-        
-
         # use the last half among the decoder layers for time alignment by default;
         # to use a specific set of heads, see `set_alignment_heads()` below.
         all_heads = torch.zeros(

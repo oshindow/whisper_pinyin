@@ -3,6 +3,7 @@
 [![Python](https://img.shields.io/badge/python-3.8-blue.svg)](https://www.python.org/)
 [![PyTorch](https://img.shields.io/badge/pytorch-2.0.0%2Bcu118-ee4c2c.svg)](https://pytorch.org/)
 [![k2](https://img.shields.io/badge/k2-1.24.4.dev20250304-green.svg)](https://github.com/k2-fsa/k2)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 Official implementation of **Whisper-Pinyin**, a Mandarin pinyin-level speech model for ASR and mispronunciation diagnosis.
 
@@ -223,3 +224,4 @@ CUDA_VISIBLE_DEVICES=0 python inference/inference_pinyin_ctc_w2v.py \
 ## 📝 Notes for Users
 
 - This project borrows and adapts a lot of code and ideas from [Whisper](https://github.com/openai/whisper), [k2](https://github.com/k2-fsa/k2), [icefall](https://github.com/k2-fsa/icefall), [SpeechBrain](https://github.com/speechbrain/speechbrain), and [FSQ](https://arxiv.org/abs/2309.15505). Please also follow the licenses and citation guidance of those upstream projects when using this repository.
+- See [LICENSE](LICENSE) for the project license, [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for upstream code notices, and `LICENSES/` for third-party license references.
