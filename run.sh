@@ -1,24 +1,29 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
 export PYTHONPATH="$(pwd):${PYTHONPATH:-}"
 DATA_ROOT="${DATA_ROOT:-/path/to/data-root}"
 EXP_DIR="${EXP_DIR:-exp2}"
+TRAIN_PATH="${TRAIN_PATH:-dump/aishell3/train/text}"
+CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
 # CUDA_VISIBLE_DEVICES=0 python3 -u scripts/whisper_pinyin/finetuning_pinyin_otc_cross_fsq_mellen.py \
 #     --data-root "$DATA_ROOT" \
 #     --epoch 10 --train-name "whisper_pinyin" --train-id "001" \
 #     --initial-bypass-weight -50 --initial-self-loop-weight 3.75 \
-#     --batch-size 8 --train-path dump/aishell3/train/text \
+#     --batch-size 8 --train-path "$TRAIN_PATH" \
 #     --model-name "small" --ctc-layers 2 --n_mels 80 --precision "bf16-mixed" \
 #     --learning-rate 1e-4 --weight-decay 0.01 --adam-epsilon 1e-8 --warmup-steps 1000 \
 #     > exp.log
 
 
-CUDA_VISIBLE_DEVICES=0 python scripts/baseline/finetuning_pinyin_otc.py \
+CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" python scripts/baseline/finetuning_pinyin_otc.py \
   --epoch 10 \
   --data-root "$DATA_ROOT" \
   --train-name whisper_pinyin_aishell3_otc \
   --train-id 001 \
   --exp-dir "$EXP_DIR" \
-  --train-path dump/aishell3/train/text \
+  --train-path "$TRAIN_PATH" \
   --model-name small \
   --ctc-layers 2 \
   --n_mels 80 \
