@@ -1,0 +1,42 @@
+class Config:
+    learning_rate = 1e-4 # 1e-5
+    weight_decay = 0.1 # 0.01
+    adam_epsilon = 1e-6 # 1e-8
+    warmup_steps = 20 # 50 
+    batch_size = 32
+    num_worker = 8
+    num_train_epochs = 10
+    n_mels = 80
+    gradient_accumulation_steps = 1
+    sample_rate = 16000
+    token = 'text'
+    datasets = ['aishell3', 'latic', 'magichub', 'sichuan']
+    train_path = 'train_data_clean'
+    val_path = ['dump2/latic/test/' + token]
+    test_path = ['dump2/aishell3/test/' + token, 'dump2/latic/test/' + token, 'dump2/magichub/test/' + token, 'dump2/sichuan/test/' + token]
+    spk_info_path = 'dump/aishell3/spk_info_only.txt'
+    accent_classes = 3 # Number of accents (North + South + others)
+    subsampling_factor = 2
+    lang_dir = 'data/pinyin'
+    otc_token = '<star>'
+    initial_bypass_weight = -19
+    initial_self_loop_weight = 3.75 # 3.75
+    bypass_weight_decay =  0.975
+    self_loop_weight_decay =   0.999
+    allow_bypass_arc = True
+    allow_self_loop_arc = True
+    beam_size = 10
+    reduction = "mean"
+    use_double_scores = True
+    show_alignment = True
+    show_alignment_interval = 100
+    search_beam = 20 
+    output_beam = 8
+    min_active_states = 30
+    max_active_states = 10000
+    hidden_size = 384
+    vocab_size = 280
+    pad_token_id = 0
+    ctc_layers = 2
+
+    
