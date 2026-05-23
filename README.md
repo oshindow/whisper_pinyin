@@ -1,4 +1,8 @@
-# Whisper-Pinyin
+# 🎧 Whisper-Pinyin
+
+[![Python](https://img.shields.io/badge/python-3.8-blue.svg)](https://www.python.org/)
+[![PyTorch](https://img.shields.io/badge/pytorch-2.0.0%2Bcu118-ee4c2c.svg)](https://pytorch.org/)
+[![k2](https://img.shields.io/badge/k2-1.24.4.dev20250304-green.svg)](https://github.com/k2-fsa/k2)
 
 Official implementation of **Whisper-Pinyin**, a Mandarin pinyin-level speech model for ASR and mispronunciation diagnosis.
 
@@ -8,7 +12,7 @@ This release is organized as an AISHELL-3-only open-source codebase:
 - use the AISHELL-3 testing set for evaluation;
 - keep downloaded datasets, checkpoints, logs, and generated manifests outside git.
 
-## Quick Start
+## 🚀 Quick Start
 
 ```bash
 git clone https://github.com/oshindow/whisper_pinyin.git
@@ -23,7 +27,7 @@ python -c "import torch, torchaudio, k2; print(torch.__version__)"
 
 The reference environment uses Python 3.8, CUDA 11.8, torch 2.0.0, k2, icefall, and lhotse. See `requirements.txt` for pinned package versions.
 
-## Repository Layout
+## 🗂️ Repository Layout
 
 ```text
 config.py                                      Shared experiment defaults
@@ -64,7 +68,7 @@ inference/
 ```
  
 
-## Data Preparation
+## 📦 Data Preparation
 
 This repository already provides AISHELL-3 text manifests under:
 
@@ -85,7 +89,7 @@ You only need to prepare the AISHELL-3 audio files. Convert all audio to 16 kHz,
 
 `dump/aishell3/val/text_100` is a 100-utterance validation subset randomly sampled from `dump/aishell3/val/text`.
 
-## Fine-Tuning
+## 🏋️ Fine-Tuning
 
 Baseline Whisper-OTC:
 
@@ -200,7 +204,7 @@ Checkpoints are saved under:
 exp2/<train-name>/<train-id>/
 ```
 
-## Inference
+## 🔍 Inference
 
 Run Whisper-Pinyin inference on the AISHELL-3 test manifest:
 
@@ -221,6 +225,6 @@ CUDA_VISIBLE_DEVICES=0 python inference/inference_pinyin_ctc_w2v.py \
 ```
   
 
-## Notes for Users
+## 📝 Notes for Users
 
 - This project borrows and adapts a lot of code and ideas from [Whisper](https://github.com/openai/whisper), [k2](https://github.com/k2-fsa/k2), [icefall](https://github.com/k2-fsa/icefall), [SpeechBrain](https://github.com/speechbrain/speechbrain), and [FSQ](https://arxiv.org/abs/2309.15505). Please also follow the licenses and citation guidance of those upstream projects when using this repository.
