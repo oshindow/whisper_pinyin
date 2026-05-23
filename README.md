@@ -10,7 +10,6 @@ This release is organized as an AISHELL-3-only open-source codebase:
 
 - use the AISHELL-3 training set for fine-tuning;
 - use the AISHELL-3 testing set for evaluation;
-- keep downloaded datasets, checkpoints, logs, and generated manifests outside git.
 
 ## 🚀 Quick Start
 
@@ -24,8 +23,7 @@ conda activate whisper-pinyin
 
 python -c "import torch, torchaudio, k2; print(torch.__version__)"
 ```
-
-The reference environment uses Python 3.8, CUDA 11.8, torch 2.0.0, k2, icefall, and lhotse. See `requirements.txt` for pinned package versions.
+ 
 
 ## 🗂️ Repository Layout
 
@@ -41,9 +39,6 @@ preprocessing/
   preprocess.py                               Character-level dataset
   preprocess_pinyin.py                        Whisper-Pinyin dataset
   preprocess_pinyin_w2v.py                    Wav2Vec2 dataset
-
-scripts/
-  prepare_aishell3.py                         AISHELL-3 manifest builder
 
 scripts/baseline/
   finetuning_pinyin_otc.py                    Baseline: OTC
