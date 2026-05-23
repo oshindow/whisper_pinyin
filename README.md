@@ -19,8 +19,8 @@ git clone https://github.com/oshindow/whisper_pinyin.git
 cd whisper_pinyin
 
 conda env create -f environment.yml
-pip install pytorch-lightning==2.4.0 --no-deps
 conda activate whisper-pinyin
+pip install pytorch-lightning==2.4.0 --no-deps
 
 python -c "import torch, torchaudio, k2; print(torch.__version__)"
 ```
@@ -92,7 +92,7 @@ Baseline Whisper-OTC:
 ```bash
 CUDA_VISIBLE_DEVICES=0 python scripts/baseline/finetuning_pinyin_otc.py \
   --epoch 10 \
-  --data-root path/to/aishell3 \
+  --data-root path/to/data-root \
   --train-name whisper_pinyin_aishell3_otc \
   --train-id 001 \
   --exp-dir exp2 \
@@ -113,7 +113,7 @@ Baseline Wav2Vec2:
 ```bash
 CUDA_VISIBLE_DEVICES=0 python scripts/baseline/finetuning_pinyin_w2v.py \
   --epoch 10 \
-  --data-root path/to/aishell3 \
+  --data-root path/to/data-root \
   --train-name whisper_pinyin_aishell3_w2v \
   --train-id 001 \
   --exp-dir exp2 \
@@ -136,7 +136,7 @@ Whisper-Pinyin OTC cross continuous:
 ```bash
 CUDA_VISIBLE_DEVICES=0 python scripts/whisper_pinyin/finetuning_pinyin_otc_cross_continuous.py \
   --epoch 10 \
-  --data-root path/to/aishell3 \
+  --data-root path/to/data-root \
   --train-name whisper_pinyin_aishell3_otc_cross_continuous \
   --train-id 001 \
   --exp-dir exp2 \
@@ -157,7 +157,7 @@ Whisper-Pinyin OTC cross continuous MELLEN:
 ```bash
 CUDA_VISIBLE_DEVICES=0 python scripts/whisper_pinyin/finetuning_pinyin_otc_cross_continuous_mellen.py \
   --epoch 10 \
-  --data-root path/to/aishell3 \
+  --data-root path/to/data-root \
   --train-name whisper_pinyin_aishell3_otc_cross_continuous_mellen \
   --train-id 001 \
   --exp-dir exp2 \
@@ -178,7 +178,7 @@ Whisper-Pinyin OTC cross FSQ MELLEN:
 ```bash
 CUDA_VISIBLE_DEVICES=0 python scripts/whisper_pinyin/finetuning_pinyin_otc_cross_fsq_mellen.py \
   --epoch 10 \
-  --data-root path/to/aishell3 \
+  --data-root path/to/data-root \
   --train-name whisper_pinyin_aishell3_otc_cross_fsq_mellen \
   --train-id 001 \
   --exp-dir exp2 \

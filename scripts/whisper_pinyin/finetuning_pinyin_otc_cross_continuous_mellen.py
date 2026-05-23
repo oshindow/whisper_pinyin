@@ -1,4 +1,9 @@
- 
+from pathlib import Path
+import sys
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+
 import torch
 import torch.nn as nn
 import whisper
@@ -27,7 +32,7 @@ from otc_graph_compiler import OtcTrainingGraphCompiler
 import random
 import numpy as np
 import argparse
-from fsq import FSQ
+from scripts.whisper_pinyin.fsq import FSQ
 
 
 def set_seed(seed):
