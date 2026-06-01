@@ -25,45 +25,7 @@ pip install pytorch-lightning==2.4.0 --no-deps
 
 python -c "import torch, torchaudio, k2; print(torch.__version__)"
 ```
- 
 
-## 🗂️ Repository Layout
-
-```text
-config.py                                      Shared experiment defaults
-requirements.txt                              Python package versions
-environment.yml                               Conda environment
-utils.py                                      Metrics and helper functions
-graph_compiler.py                             CTC graph compiler
-otc_graph_compiler.py                         OTC graph compiler
-
-preprocessing/
-  preprocess.py                               Character-level dataset
-  preprocess_pinyin.py                        Whisper-Pinyin dataset
-  preprocess_pinyin_w2v.py                    Wav2Vec2 dataset
-
-scripts/baseline/
-  finetuning_pinyin_otc.py                    Baseline: OTC
-  finetuning_pinyin_w2v.py                    Baseline: Wav2Vec2
-  finetuning_pinyin_ctc_k2.py                 Baseline: CTC with k2
-  finetuning_pinyin_ctc_torch.py              Baseline: CTC with torch
-
-scripts/whisper_pinyin/
-  finetuning_pinyin_otc_cross_continuous.py
-  finetuning_pinyin_otc_cross_continuous_mellen.py
-  finetuning_pinyin_otc_cross_fsq_mellen.py
-
-scripts/annotator/
-  finetuning.py                               Character annotator
-  finetuning_pinyin.py                        Pinyin annotator
-
-inference/
-  inference_pinyin_ctc.py                     Whisper-Pinyin inference
-  inference_pinyin_ctc_w2v.py                 Wav2Vec2 inference
-  inference.py                                Character-level inference
-  inference_pinyin.py                         Pinyin decoder inference
-```
- 
 
 ## 📦 Data Preparation
 
@@ -92,7 +54,7 @@ Before training, update `DATA_ROOT` and `EXP_DIR` in `run.sh` to match your loca
 
 ### Run the Default Experiment
 
-The provided `run.sh` launches the Whisper-Pinyin OTC cross continuous experiment:
+The provided `run.sh` launches the Whisper-Pinyin with Cross-augmentation (continuous) experiment:
 
 ```bash
 ./run.sh
@@ -128,12 +90,7 @@ CUDA_VISIBLE_DEVICES=0 python scripts/baseline/finetuning_pinyin_otc.py \
   --adam-epsilon 1e-8 \
   --warmup-steps 1000 > exp_whisper_otc.log
 ```
-Checkpoints are saved under:
-
-```text
-exp2/<train-name>/<train-id>/
-```
-
+ 
 ## 🔍 Inference
 
 Run Whisper-Pinyin inference on the AISHELL-3 test manifest:
