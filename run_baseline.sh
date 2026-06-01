@@ -4,22 +4,19 @@ DATA_ROOT="/path/to/data/"
 EXP_DIR="/path/to/exp/"
  
 
-CUDA_VISIBLE_DEVICES=0 python scripts/whisper_pinyin/finetuning_pinyin_otc_cross_continuous.py \
+CUDA_VISIBLE_DEVICES=1 python scripts/baseline/finetuning_pinyin_otc.py \
   --epoch 10 \
   --data-root $DATA_ROOT \
-  --train-name whisper_pinyin_aishell3_otc_cross_continuous \
-  --initial-bypass-weight -50 \
-  --initial-self-loop-weight 3.75 \
+  --train-name whisper_pinyin_aishell3_otc \
   --train-id 001 \
   --exp-dir $EXP_DIR \
   --train-path dump/aishell3/train/text \
   --model-name small \
   --ctc-layers 2 \
   --n_mels 80 \
-  --batch-size 16 \
+  --batch-size 32 \
   --precision bf16-mixed \
   --learning-rate 1e-4 \
   --weight-decay 0.01 \
   --adam-epsilon 1e-8 \
-  --index-ratio 0.1 --sim-loss-scale 0.6 \
-  --warmup-steps 1000 > exp.log
+  --warmup-steps 1000 > exp_whisper_otc.log

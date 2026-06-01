@@ -18,8 +18,9 @@ This release is organized as an AISHELL-3-only open-source codebase:
 git clone https://github.com/oshindow/whisper_pinyin.git
 cd whisper_pinyin
 
-conda env create -f environment.yml
+conda create -n whisper-pinyin python=3.8 ffmpeg -y
 conda activate whisper-pinyin
+pip install -r requirements.txt
 pip install pytorch-lightning==2.4.0 --no-deps
 
 python -c "import torch, torchaudio, k2; print(torch.__version__)"
@@ -87,113 +88,46 @@ You only need to prepare the AISHELL-3 audio files. Convert all audio to 16 kHz,
 
 ## 🏋️ Fine-Tuning
 
-Baseline Whisper-OTC:
+Before training, update `DATA_ROOT` and `EXP_DIR` in `run.sh` to match your local paths.
+
+### Run the Default Experiment
+
+The provided `run.sh` launches the Whisper-Pinyin OTC cross continuous experiment:
+
+```bash
+./run.sh
+```
+
+Recommended setting for a single NVIDIA RTX A5000 with 24 GB VRAM:
+
+- Batch size: 16
+- Runtime: approximately 60 minutes per epoch
+
+### Baseline: Whisper-OTC
+
+Recommended setting for a single NVIDIA RTX A5000 with 24 GB VRAM:
+
+- Batch size: 32
+- Runtime: approximately 30 minutes per epoch
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 python scripts/baseline/finetuning_pinyin_otc.py \
   --epoch 10 \
-  --data-root path/to/data-root \
+  --data-root $DATA_ROOT \
   --train-name whisper_pinyin_aishell3_otc \
   --train-id 001 \
-  --exp-dir exp2 \
+  --exp-dir $EXP_DIR \
   --train-path dump/aishell3/train/text \
   --model-name small \
   --ctc-layers 2 \
   --n_mels 80 \
-  --batch-size 6 \
+  --batch-size 16 \
   --precision bf16-mixed \
   --learning-rate 1e-4 \
   --weight-decay 0.01 \
   --adam-epsilon 1e-8 \
-  --warmup-steps 1000 > exp.log
+  --warmup-steps 1000 > exp_whisper_otc.log
 ```
-
-Baseline Wav2Vec2:
-
-```bash
-CUDA_VISIBLE_DEVICES=0 python scripts/baseline/finetuning_pinyin_w2v.py \
-  --epoch 10 \
-  --data-root path/to/data-root \
-  --train-name whisper_pinyin_aishell3_w2v \
-  --train-id 001 \
-  --exp-dir exp2 \
-  --train-path dump/aishell3/train/text \
-  --model-name small \
-  --ctc-layers 2 \
-  --n_mels 80 \
-  --batch-size 6 \
-  --precision bf16-mixed \
-  --learning-rate 1e-4 \
-  --weight-decay 0.01 \
-  --adam-epsilon 1e-8 \
-  --warmup-steps 1000 > exp_w2v.log
-```
-
-Whisper-Pinyin variants:
-
-Whisper-Pinyin OTC cross continuous:
-
-```bash
-CUDA_VISIBLE_DEVICES=0 python scripts/whisper_pinyin/finetuning_pinyin_otc_cross_continuous.py \
-  --epoch 10 \
-  --data-root path/to/data-root \
-  --train-name whisper_pinyin_aishell3_otc_cross_continuous \
-  --train-id 001 \
-  --exp-dir exp2 \
-  --train-path dump/aishell3/train/text \
-  --model-name small \
-  --ctc-layers 2 \
-  --n_mels 80 \
-  --batch-size 6 \
-  --precision bf16-mixed \
-  --learning-rate 1e-4 \
-  --weight-decay 0.01 \
-  --adam-epsilon 1e-8 \
-  --warmup-steps 1000 > exp_otc_cross_continuous.log
-```
-
-Whisper-Pinyin OTC cross continuous MELLEN:
-
-```bash
-CUDA_VISIBLE_DEVICES=0 python scripts/whisper_pinyin/finetuning_pinyin_otc_cross_continuous_mellen.py \
-  --epoch 10 \
-  --data-root path/to/data-root \
-  --train-name whisper_pinyin_aishell3_otc_cross_continuous_mellen \
-  --train-id 001 \
-  --exp-dir exp2 \
-  --train-path dump/aishell3/train/text \
-  --model-name small \
-  --ctc-layers 2 \
-  --n_mels 80 \
-  --batch-size 6 \
-  --precision bf16-mixed \
-  --learning-rate 1e-4 \
-  --weight-decay 0.01 \
-  --adam-epsilon 1e-8 \
-  --warmup-steps 1000 > exp_otc_cross_continuous_mellen.log
-```
-
-Whisper-Pinyin OTC cross FSQ MELLEN:
-
-```bash
-CUDA_VISIBLE_DEVICES=0 python scripts/whisper_pinyin/finetuning_pinyin_otc_cross_fsq_mellen.py \
-  --epoch 10 \
-  --data-root path/to/data-root \
-  --train-name whisper_pinyin_aishell3_otc_cross_fsq_mellen \
-  --train-id 001 \
-  --exp-dir exp2 \
-  --train-path dump/aishell3/train/text \
-  --model-name small \
-  --ctc-layers 2 \
-  --n_mels 80 \
-  --batch-size 6 \
-  --precision bf16-mixed \
-  --learning-rate 1e-4 \
-  --weight-decay 0.01 \
-  --adam-epsilon 1e-8 \
-  --warmup-steps 1000 > exp_otc_cross_fsq_mellen.log
-```
-
 Checkpoints are saved under:
 
 ```text

@@ -18,6 +18,7 @@ data/lang_whisper/*
 !data/whisper/
 data/whisper/*
 !data/whisper/tokens.txt
+!data/whisper/tokens_otc.txt
 dump2/
 exp2/
 resources/
@@ -38,3 +39,4 @@ whisper_pinyin_github
 whisper_pinyin_cr
 
 git_push.sh
+ 
