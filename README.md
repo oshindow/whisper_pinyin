@@ -5,12 +5,7 @@
 [![k2](https://img.shields.io/badge/k2-1.24.4.dev20250304-green.svg)](https://github.com/k2-fsa/k2)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Official implementation of **Whisper-Pinyin**, a Mandarin pinyin-level speech model for ASR and mispronunciation diagnosis.
-
-This release is organized as an AISHELL-3-only open-source codebase:
-
-- use the AISHELL-3 training set for fine-tuning;
-- use the AISHELL-3 testing set for evaluation;
+Official implementation of **Whisper-Pinyin**, a Pinyin-level speech model for Mandarin speech assessment.
 
 ## 🚀 Quick Start
 
