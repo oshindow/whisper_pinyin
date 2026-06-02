@@ -24,25 +24,25 @@ Official implementation of **Whisper-Pinyin**, a Pinyin-level speech model for M
 <th align="right">Token error rate</th>
 </tr>
 <tr>
-<td>Whisper-OTC baseline</td>
+<td>Whisper-OTC (baseline)</td>
 <td>OTC</td>
 <td align="right">4.09%</td>
 </tr>
 <tr>
 <td><strong>Whisper-Pinyin</strong></td>
-<td><strong>Cross-augmentation (continuous)</strong></td>
+<td><strong>OTC + Cross-augmentation (continuous)</strong></td>
 <td align="right"><strong>3.33%</strong></td>
 </tr>
 </table>
 
-<p><strong>Core result:</strong> Whisper-Pinyin reduces token error rate by <strong>0.76 absolute points</strong>, a <strong>18.6% relative reduction</strong> over the Whisper-OTC baseline.</p>
+<p><strong>Core result:</strong> Whisper-Pinyin reduces token error rate by a <strong>18.6% relative reduction</strong> over the Whisper-OTC baseline.</p>
 
 </td>
 <td width="50%" valign="top">
 
 <img src="image/whisper-pinyin-cross6.png" alt="Whisper-Pinyin cross-augmentation architecture" width="430">
 
-<sub>Whisper-Pinyin cross-augmentation architecture. Original PDF: <a href="image/whisper-pinyin-cross6.pdf">image/whisper-pinyin-cross6.pdf</a>.</sub>
+<sub>Whisper-Pinyin cross-augmentation architecture.</sub>
 
 </td>
 </tr>
