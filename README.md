@@ -48,6 +48,24 @@ Detailed results can be found in
 and 
 `results/results_otc_aishell3_test.txt`
 
+## Demo
+
+[![Open in Spaces](https://img.shields.io/badge/%F0%9F%A4%97%20Open%20Demo-Hugging%20Face%20Space-blue)](https://huggingface.co/spaces/walston/whisper-pinyin-demo)
+[![Model Repo](https://img.shields.io/badge/%F0%9F%A4%97%20Model-walston%2Fwhisper--pinyin-yellow)](https://huggingface.co/walston/whisper-pinyin)
+
+Try Whisper-Pinyin directly in the browser with the hosted Hugging Face Space:
+[**walston/whisper-pinyin-demo**](https://huggingface.co/spaces/walston/whisper-pinyin-demo).
+
+<p align="center">
+  <a href="https://huggingface.co/spaces/walston/whisper-pinyin-demo">
+    <img src="image/whisper-pinyin-demo.gif" alt="Whisper-Pinyin Hugging Face Space demo" width="720">
+  </a>
+</p>
+
+The demo runs the cross-augmentation continuous checkpoint from the
+[walston/whisper-pinyin](https://huggingface.co/walston/whisper-pinyin)
+model repository. On the public CPU Space, decoding runs at approximately **RTF 1.0**.
+
 ## 🚀 Quick Start
 
 ```bash
@@ -127,53 +145,7 @@ CUDA_VISIBLE_DEVICES=0 python scripts/baseline/finetuning_pinyin_otc.py \
   --warmup-steps 1000 > exp_whisper_otc.log
 ```
  
-## Demo
-
-[![Open in Spaces](https://img.shields.io/badge/%F0%9F%A4%97%20Open%20Demo-Hugging%20Face%20Space-blue)](https://huggingface.co/spaces/walston/whisper-pinyin-demo)
-[![Model Repo](https://img.shields.io/badge/%F0%9F%A4%97%20Model-walston%2Fwhisper--pinyin-yellow)](https://huggingface.co/walston/whisper-pinyin)
-
-Try the live demo on Hugging Face Spaces:
-[walston/whisper-pinyin-demo](https://huggingface.co/spaces/walston/whisper-pinyin-demo)
-
-<p align="center">
-  <a href="https://huggingface.co/spaces/walston/whisper-pinyin-demo">
-    <img src="image/whisper-pinyin-demo.gif" alt="Whisper-Pinyin Hugging Face Space demo" width="720">
-  </a>
-</p>
-
-A Hugging Face Space template is provided under `demo/space`. It serves a Gradio page where users can upload Mandarin speech audio and get the decoded Pinyin output from the Whisper-Pinyin cross-augmentation continuous checkpoint.
-
-The recommended deployment keeps the model weights in a separate Hugging Face Model Repository:
-
-```python
-from transformers import AutoModel
-
-model = AutoModel.from_pretrained(
-    "walston/whisper-pinyin",
-    trust_remote_code=True,
-)
-```
-
-Create the model repo and upload the cross-continuous checkpoint:
-
-```bash
-huggingface-cli login
-huggingface-cli repo create walston/whisper-pinyin --type model
-
-./demo/model_repo/upload_model_repo.sh \
-  walston/whisper-pinyin \
-  /path/to/cross-continuous/checkpoint.ckpt
-```
-
-Then create the Gradio Space and upload the demo:
-
-```bash
-huggingface-cli repo create walston/whisper-pinyin-demo --type space --space_sdk gradio
-
-./demo/space/upload_space.sh walston/whisper-pinyin-demo
-```
-
-The Space loads `walston/whisper-pinyin` by default. Override this with the `WHISPER_PINYIN_MODEL_ID` environment variable if you publish the model under a different repo id.
+ 
 
 ## 🔍 Inference
 
