@@ -52,12 +52,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", default="hf_model/checkpoint-epoch=0009.ckpt")
     parser.add_argument("--test-path", default=Config.test_path)
+    parser.add_argument("--data-root", default=Config.data_root)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--output", default="errorfile_w2v_aishell3_test")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
 
     Config.test_path = args.test_path
+    Config.data_root = args.data_root
     error_file = open(args.output, 'w', encoding='utf8')
     ckpt = torch.load(args.checkpoint, map_location="cpu")
     w2v = Wav2Vec2Model.from_pretrained("TencentGameMate/chinese-wav2vec2-large").to(args.device)

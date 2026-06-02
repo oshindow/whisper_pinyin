@@ -5,10 +5,12 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import torch
+import argparse
 from preprocessing.preprocess import WhisperPinyinDataset, WhisperDataCollatorWhithPadding
 from transformers import WhisperTokenizer
 import whisper
 from utils import error_stats, normlizer
+from config import Config
 import time
 import os
 train_text_path = 'dump/aishell3/train/text_char'
@@ -17,11 +19,17 @@ train_wave_path = 'dump/aishell3/train/wav.scp'
 test_text_path = 'dump/aishell3/test/text_char'
 test_wave_path = 'dump/aishell3/test/wav.scp'
 
+parser = argparse.ArgumentParser()
+parser.add_argument("--data-root", default=Config.data_root)
+args = parser.parse_args()
+
+Config.data_root = args.data_root
+
 # model = whisper.load_model("exp/checkpoint/checkpoint-epoch=0000-v7.ckpt") # good
 model = whisper.load_model("exp/checkpoint/checkpoint-epoch=0005.ckpt") 
 # model = whisper.load_model("turbo")
 tokenizer = WhisperTokenizer.from_pretrained("openai/whisper-large-v3-turbo", language="zh", task="transcribe")
-train_dataset = WhisperPinyinDataset(test_text_path, tokenizer, task='test')
+train_dataset = WhisperPinyinDataset(test_text_path, tokenizer, config=Config, task='test')
 train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=1, collate_fn=WhisperDataCollatorWhithPadding())
 initial_prompt = "以下是普通话的句子。"
 initial_prompt_tokens = tokenizer.encode(" " + initial_prompt.strip())
