@@ -15,5 +15,4 @@ huggingface-cli upload "$SPACE_ID" demo/space/requirements.txt requirements.txt 
 huggingface-cli upload "$SPACE_ID" demo/space/packages.txt packages.txt --repo-type space
 huggingface-cli upload "$SPACE_ID" demo/space/.gitattributes .gitattributes --repo-type space
 huggingface-cli upload "$SPACE_ID" whisper whisper --repo-type space
-huggingface-cli upload "$SPACE_ID" demo/space/runtime.txt runtime.txt --repo-type space
 echo "Uploaded demo to https://huggingface.co/spaces/$SPACE_ID"

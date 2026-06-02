@@ -64,7 +64,7 @@ Try Whisper-Pinyin directly in the browser with the hosted Hugging Face Space:
 
 The demo runs the cross-augmentation continuous checkpoint from the
 [walston/whisper-pinyin](https://huggingface.co/walston/whisper-pinyin)
-model repository. On the public CPU Space, decoding runs at approximately **RTF 1.0**.
+model repository. On the public CPU Space, decoding runs at approximately **RTF 1.76**.
 
 ## 🚀 Quick Start
 

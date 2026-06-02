@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 from functools import lru_cache
 from pathlib import Path
 
@@ -44,11 +45,20 @@ def decode_audio(audio_path: str):
         raise gr.Error("Please upload an audio file first.")
 
     model = load_model()
+    if DEVICE == "cuda":
+        torch.cuda.synchronize()
+    start_time = time.perf_counter()
     result = model.decode_file(audio_path, device=DEVICE)
+    if DEVICE == "cuda":
+        torch.cuda.synchronize()
+    decode_time = time.perf_counter() - start_time
+    rtf = decode_time / max(result["duration"], 1e-6)
     info = (
         f"Device: {DEVICE}\n"
         f"Model repo: {MODEL_REPO_ID}\n"
-        f"Input duration: {result['duration']:.2f}s"
+        f"Input duration: {result['duration']:.2f}s\n"
+        f"Decode time: {decode_time:.2f}s\n"
+        f"RTF: {rtf:.2f}"
     )
     return result["pinyin"], result["tokens"], info
 
@@ -68,7 +78,7 @@ with gr.Blocks(title="Whisper-Pinyin Demo") as demo:
         with gr.Column():
             syllable_output = gr.Textbox(label="Decoded Pinyin", lines=4)
             token_output = gr.Textbox(label="Raw token sequence", lines=4)
-            info_output = gr.Textbox(label="Runtime info", lines=3)
+            info_output = gr.Textbox(label="Runtime info", lines=5)
 
     decode_button = gr.Button("Decode", variant="primary")
     decode_button.click(
