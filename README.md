@@ -15,7 +15,7 @@ Official implementation of **Whisper-Pinyin**, a Pinyin-level speech model for M
 
 <h3>AISHELL-3 Test Set</h3>
 
-<p>Whisper-Pinyin with cross-augmentation achieves the best token error rate on the AISHELL-3 test set.</p>
+<p>Whisper-Pinyin with cross-augmentation consistency regularization achieves an **18.6%** relative reduction in token error rate over the Whisper-OTC baseline on the AISHELL-3 test set.</p>
 
 <table>
 <tr>
@@ -31,16 +31,14 @@ Official implementation of **Whisper-Pinyin**, a Pinyin-level speech model for M
 <td align="right"><strong>3.33%</strong></td>
 </tr>
 </table>
-
-<p><strong>Core result:</strong> Whisper-Pinyin reduces token error rate by a <strong>18.6% relative reduction</strong> over the Whisper-OTC baseline.</p>
+ 
 
 </td>
 <td width="50%" valign="top">
 
 <img src="image/whisper-pinyin-cross6.png" alt="Whisper-Pinyin cross-augmentation architecture" width="430">
 
-<sub>Whisper-Pinyin cross-augmentation architecture.</sub>
-
+ 
 </td>
 </tr>
 </table>
