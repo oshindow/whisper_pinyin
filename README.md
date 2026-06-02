@@ -20,17 +20,14 @@ Official implementation of **Whisper-Pinyin**, a Pinyin-level speech model for M
 <table>
 <tr>
 <th>Model</th>
-<th>Training recipe</th>
 <th align="right">Token error rate</th>
 </tr>
 <tr>
 <td>Whisper-OTC (baseline)</td>
-<td>OTC</td>
 <td align="right">4.09%</td>
 </tr>
 <tr>
 <td><strong>Whisper-Pinyin</strong></td>
-<td><strong>OTC + Cross-augmentation (continuous)</strong></td>
 <td align="right"><strong>3.33%</strong></td>
 </tr>
 </table>
