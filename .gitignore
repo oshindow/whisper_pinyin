@@ -31,7 +31,6 @@ hf_space/
 nohup.out
 *.log
 errorfile*
-results*
 huggingface*
 
 whisper_pinyin_sys_logs/

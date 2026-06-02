@@ -1,0 +1,16 @@
+{
+  "model_type": "whisper_pinyin",
+  "architectures": [
+    "WhisperPinyinModel"
+  ],
+  "auto_map": {
+    "AutoConfig": "configuration_whisper_pinyin.WhisperPinyinConfig",
+    "AutoModel": "modeling_whisper_pinyin.WhisperPinyinModel"
+  },
+  "checkpoint_filename": "checkpoint-epoch=0009.ckpt",
+  "token_table_filename": "tokens.txt",
+  "n_mels": 80,
+  "sample_rate": 16000,
+  "vocab_size": 280,
+  "ctc_layers": 2
+}
