@@ -38,4 +38,4 @@ whisper_pinyin_github
 whisper_pinyin_cr
 
 git_push.sh
- 
+*.html

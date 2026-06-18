@@ -31,6 +31,7 @@ The app expects:
 - `app.py`
 - `requirements.txt`
 - `packages.txt`
+- `examples/`
 - `whisper/`
 
 Use `demo/space/upload_space.sh` from the repository root to upload the Space app. Use `demo/model_repo/upload_model_repo.sh` to upload the checkpoint to the model repo.
