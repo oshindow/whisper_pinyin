@@ -55,3 +55,7 @@ data/jsonl_actual_split/
 data/lang_jsonl/*
 !data/lang_jsonl/lexicon.txt
 !data/lang_jsonl/tokens.txt
+!data/lang_jsonl_ift/
+data/lang_jsonl_ift/*
+!data/lang_jsonl_ift/lexicon.txt
+!data/lang_jsonl_ift/tokens.txt

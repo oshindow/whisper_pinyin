@@ -10,6 +10,7 @@ import torch.distributed as dist
 import whisper
  
 from pathlib import Path
+from preprocessing.phone_units import finals_from_lexicon, merge_units
 from preprocessing.preprocess_pinyin import WhisperPinyinDataset, WhisperDataCollatorWhithPadding
 from pytorch_lightning import LightningModule
 from pytorch_lightning import Trainer, seed_everything
@@ -58,6 +59,8 @@ class WhisperModelModule(LightningModule):
         
         
         self.lexicon = self.get_lexicon(lexicon_path=cfg.lexicon_path)
+        # Empty unless the lexicon splits tonal finals into a final plus a tone.
+        self.unit_finals = finals_from_lexicon(self.lexicon)
         self.token_table_tight = k2.SymbolTable.from_file(cfg.token_table_path)
         print(cfg.token_table_path)
 
@@ -170,16 +173,15 @@ class WhisperModelModule(LightningModule):
         errors = 0
         ref_phones = 0
         for o, l in zip(texts, pinyins):
-            l_list = []
-            for word in l.split(' '):
-                if word not in self.lexicon:
-                    continue
-                
-                for piece in self.lexicon[word]:
-                    l_list.append(piece)
-             
-            errors += self.edit_distance(l_list, o)
-            ref_phones += len(l_list)
+            # PER stays at the phone level whatever the CTC units are: the
+            # hypothesis units are merged back into tonal finals and scored
+            # against the phones the manifest annotates, so checkpoint
+            # selection is comparable across unit inventories.
+            hyp = merge_units(o, self.unit_finals)
+            ref = [word for word in l.split(' ') if word in self.lexicon]
+
+            errors += self.edit_distance(ref, hyp)
+            ref_phones += len(ref)
         self.val_errors += errors
         self.val_ref_phones += ref_phones
 

@@ -16,6 +16,7 @@ import torchaudio
 from torch.utils.data import DataLoader, Dataset
 
 import whisper
+from preprocessing.phone_units import finals_from_lexicon, merge_units, read_lexicon
 from preprocessing.preprocess_pinyin import _resolve_jsonl_audio
 
 
@@ -97,7 +98,7 @@ def load_tokens(path):
     return table
 
 
-def ctc_decode(logits, tokens):
+def ctc_decode(logits, tokens, finals=frozenset()):
     outputs = []
     for sequence in logits.argmax(-1).cpu().tolist():
         collapsed = []
@@ -106,7 +107,9 @@ def ctc_decode(logits, tokens):
             if token_id != previous and token_id not in (0, 1, 2):
                 collapsed.append(tokens[token_id])
             previous = token_id
-        outputs.append(collapsed)
+        # Scoring stays at the phone level whatever the CTC units are, so an
+        # initial/final/tone hypothesis is merged back into tonal finals here.
+        outputs.append(merge_units(collapsed, finals))
     return outputs
 
 
@@ -161,6 +164,11 @@ def main():
     parser.add_argument("--manifests", nargs="+", required=True)
     parser.add_argument("--data-root", default="/data2/xintong/datasets/datasets")
     parser.add_argument("--tokens", default="data/lang_jsonl/tokens.txt")
+    parser.add_argument(
+        "--lexicon", default=None,
+        help="Phone-to-unit lexicon; defaults to lexicon.txt beside --tokens. It tells "
+             "which units a tone may attach to, and an identity lexicon disables merging.",
+    )
     parser.add_argument("--ctc-vocab", type=int, default=188)
     parser.add_argument("--output-dir", default="results/whisper_pinyin_ctc_jsonl")
     parser.add_argument("--batch-size", type=int, default=16)
@@ -183,6 +191,8 @@ def main():
     if device.type == "cuda":
         model = model.half().to(device)
     tokens = load_tokens(args.tokens)
+    lexicon_path = Path(args.lexicon) if args.lexicon else Path(args.tokens).parent / "lexicon.txt"
+    finals = finals_from_lexicon(read_lexicon(lexicon_path)) if lexicon_path.is_file() else frozenset()
     output_dir = Path(args.output_dir)
     if rank == 0:
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -199,7 +209,7 @@ def main():
                                     enabled=device.type == "cuda"):
                     features, _ = model.encoder(mels.to(device, non_blocking=True))
                     _, logits = model.ctc_head(features)
-                for row, prediction in zip(rows, ctc_decode(logits, tokens)):
+                for row, prediction in zip(rows, ctc_decode(logits, tokens, finals)):
                     row["predicted_phones"] = prediction
                     local_rows.append(row)
 

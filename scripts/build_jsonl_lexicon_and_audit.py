@@ -3,8 +3,14 @@
 
 import argparse
 import json
+import sys
 from collections import Counter
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from preprocessing.phone_units import split_phone
 
 
 SPECIAL_TOKENS = ("<blk>", "<sos/eos>", "<unk>")
@@ -57,9 +63,23 @@ def main():
     parser.add_argument("--lexicon-dir", type=Path, default=Path("data/lang_jsonl"))
     parser.add_argument("--report-dir", type=Path, default=Path("reports/audio_audit"))
     parser.add_argument(
-        "--exclude-sil", action=argparse.BooleanOptionalAction, default=True,
-        help="Exclude boundary sil from CTC vocabulary and lexicon.",
+        "--unit", choices=("phone", "ift"), default="phone",
+        help="phone: one CTC unit per annotated phone (tonal finals stay whole). "
+             "ift: split every tonal final into a toneless final plus a tone, so "
+             "one syllable becomes initial, final and tone.",
     )
+    # Spelled out rather than argparse.BooleanOptionalAction, which the 3.8
+    # training environment does not have.
+    sil = parser.add_mutually_exclusive_group()
+    sil.add_argument(
+        "--exclude-sil", dest="exclude_sil", action="store_true",
+        help="Exclude boundary sil from CTC vocabulary and lexicon (default).",
+    )
+    sil.add_argument(
+        "--no-exclude-sil", dest="exclude_sil", action="store_false",
+        help="Keep boundary sil as a CTC unit.",
+    )
+    parser.set_defaults(exclude_sil=True)
     args = parser.parse_args()
 
     phone_counts = Counter()
@@ -75,11 +95,19 @@ def main():
         phone_counts.pop("sil", None)
     phones = sorted(phone_counts)
 
+    # The lexicon is keyed by the phones the manifests annotate, so splitting
+    # tonal finals changes only the right-hand side and leaves the data alone.
+    lexicon = {
+        phone: split_phone(phone) if args.unit == "ift" else [phone]
+        for phone in phones
+    }
+    units = sorted({unit for pieces in lexicon.values() for unit in pieces})
+
     args.lexicon_dir.mkdir(parents=True, exist_ok=True)
     (args.lexicon_dir / "lexicon.txt").write_text(
-        "".join(f"{phone} {phone}\n" for phone in phones), encoding="utf-8"
+        "".join(f"{phone} {' '.join(lexicon[phone])}\n" for phone in phones), encoding="utf-8"
     )
-    tokens = list(SPECIAL_TOKENS) + phones
+    tokens = list(SPECIAL_TOKENS) + units
     (args.lexicon_dir / "tokens.txt").write_text(
         "".join(f"{token} {idx}\n" for idx, token in enumerate(tokens)), encoding="utf-8"
     )
@@ -124,12 +152,13 @@ def main():
     summary_path = args.report_dir / "summary.json"
     summary_path.write_text(json.dumps({
         "train_jsonl": str(args.train_jsonl), "train_rows": train_rows,
-        "phone_field": args.phone_field,
-        "ctc_vocab_size": len(tokens), "phones": len(phones),
+        "phone_field": args.phone_field, "unit": args.unit,
+        "ctc_vocab_size": len(tokens), "phones": len(phones), "units": len(units),
         "exclude_sil": args.exclude_sil, "audits": summary,
     }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
-    print(f"Wrote {len(phones)} phones ({len(tokens)} tokens) to {args.lexicon_dir}")
+    print(f"Wrote {len(phones)} phones as {len(units)} {args.unit} units "
+          f"({len(tokens)} tokens) to {args.lexicon_dir}")
     for item in summary:
         print(f"{item['manifest']}: found={item['found']}/{item['total']}, missing={item['missing']}")
     print(f"Summary: {summary_path}")
