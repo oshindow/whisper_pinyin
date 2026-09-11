@@ -44,7 +44,10 @@ class WhisperModelModule(LightningModule):
         super().__init__()
 
         self.tokenizer = WhisperTokenizer.from_pretrained("openai/whisper-large-v3-turbo", language=lang, task="transcribe")
-        self.model = self.load_pretrained_whisper(model_name, ctc_vocab=cfg.vocab_size, ctc_layers=cfg.ctc_layers)
+        self.model = self.load_pretrained_whisper(
+            model_name, ctc_vocab=cfg.vocab_size, ctc_layers=cfg.ctc_layers,
+            use_f0=getattr(cfg, "use_f0", False), f0_dim=getattr(cfg, "f0_dim", 256),
+        )
 
         self.train_path = cfg.train_path
         self.val_path = cfg.val_path
@@ -99,13 +102,19 @@ class WhisperModelModule(LightningModule):
     def forward(self, x):
         return self.model(x)
 
+    def encode(self, batch):
+        """Encoder output, fused with the F0 branch when the recipe enables it."""
+        audio_features, _ = self.model.encoder(batch["input_ids"])
+        if self.model.f0_encoder is not None:
+            f0 = batch["f0"].to(device=audio_features.device, dtype=audio_features.dtype)
+            audio_features = self.model.f0_fusion(audio_features, self.model.f0_encoder(f0))
+        return audio_features
+
     def training_step(self, batch, batch_id):
         
-        input_ids = batch["input_ids"]
-        pinyins = batch["pinyins"] 
-        
-        audio_features,_ = self.model.encoder(input_ids)
-        audio_features = self.encoder_dropout(audio_features)
+        pinyins = batch["pinyins"]
+
+        audio_features = self.encoder_dropout(self.encode(batch))
             
         # ctc head
         _, nnet_output = self.model.ctc_head(audio_features)
@@ -162,11 +171,9 @@ class WhisperModelModule(LightningModule):
         return loss
 
     def validation_step(self, batch, batch_id):
-        input_ids = batch["input_ids"]
-        pinyins = batch["pinyins"] 
+        pinyins = batch["pinyins"]
         with torch.no_grad():
-            audio_features,_ = self.model.encoder(input_ids)
-            _, nnet_output = self.model.ctc_head(audio_features)
+            _, nnet_output = self.model.ctc_head(self.encode(batch))
 
         texts = self.ctc_decode(nnet_output, pinyins)
         
@@ -230,6 +237,9 @@ class WhisperModelModule(LightningModule):
         backbone = [p for name, p in self.model.encoder.named_parameters()
                     if p.requires_grad and not name.startswith(("conv1.", "conv2."))]
         head = list(self.model.ctc_head.parameters())
+        for module in (self.model.f0_encoder, self.model.f0_fusion):
+            if module is not None:
+                head += list(module.parameters())
         optimizer = AdamW(
             [{"params": backbone, "name": "backbone"},
              {"params": head, "name": "ctc_head"}],
@@ -262,9 +272,10 @@ class WhisperModelModule(LightningModule):
         if stage == 'fit' or stage is None:
             print('total train dataset length:', len(self.train_dataset.datalist))
 
-    def load_pretrained_whisper(self, model_name, ctc_vocab, ctc_layers):
+    def load_pretrained_whisper(self, model_name, ctc_vocab, ctc_layers, use_f0=False, f0_dim=256):
         # Load the original Whisper model
-        model = whisper.load_model(model_name, ctc_vocab=ctc_vocab, ctc_layers=ctc_layers)
+        model = whisper.load_model(model_name, ctc_vocab=ctc_vocab, ctc_layers=ctc_layers,
+                                   use_f0=use_f0, f0_dim=f0_dim)
 
         print("Loaded Whisper model and initialized missing weights.")
 
@@ -351,6 +362,11 @@ if __name__ == '__main__':
     parser.add_argument("--backbone-ramp-steps", type=int, default=3000)
     parser.add_argument("--eval-steps", type=int, default=1000)
     parser.add_argument("--dropout", type=float, default=0.1)
+    parser.add_argument(
+        "--f0-cache-dir", type=str, default=None,
+        help="Directory of cached WORLD F0 tracks; enables the F0 branch when set.",
+    )
+    parser.add_argument("--f0-dim", type=int, default=256)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--data-root",
@@ -449,6 +465,9 @@ if __name__ == '__main__':
     cfg.backbone_ramp_steps = args.backbone_ramp_steps
     cfg.eval_steps = args.eval_steps
     cfg.dropout = args.dropout
+    cfg.f0_cache_dir = args.f0_cache_dir
+    cfg.use_f0 = args.f0_cache_dir is not None
+    cfg.f0_dim = args.f0_dim
     cfg.learning_rate = args.learning_rate
     cfg.weight_decay = args.weight_decay
     cfg.adam_epsilon = args.adam_epsilon

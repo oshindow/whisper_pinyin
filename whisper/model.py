@@ -93,6 +93,56 @@ class CTCHead(nn.Module): #Add commentMore actions
         logits = self.proj(self.final_dropout(hidden))
         return hidden, logits
 
+class F0Encoder(nn.Module):
+    """Convolutional encoder over frame-level F0 features.
+
+    The input is already at the encoder frame rate, so nothing is strided here;
+    three kernel-5 layers give a 300 ms receptive field, enough to span the
+    pitch contour of one syllable.
+    """
+
+    def __init__(self, in_dim: int = 3, hidden_size: int = 128, out_dim: int = 256):
+        super().__init__()
+        widths = (in_dim, hidden_size, out_dim, out_dim)
+        self.convs = nn.ModuleList(
+            [nn.Conv1d(widths[i], widths[i + 1], kernel_size=5, padding=2) for i in range(3)]
+        )
+        self.norms = nn.ModuleList([nn.LayerNorm(widths[i + 1]) for i in range(3)])
+        self.out_dim = out_dim
+
+    def forward(self, f0: Tensor) -> Tensor:
+        """f0: (batch, n_features, n_frames) -> (batch, n_frames, out_dim)"""
+        x = f0
+        for conv, norm in zip(self.convs, self.norms):
+            # LayerNorm is fed a contiguous tensor so it takes the fast kernel
+            # path rather than normalising a transposed view.
+            x = F.gelu(conv(x)).transpose(1, 2).contiguous()
+            x = norm(x).transpose(1, 2)
+        return x.transpose(1, 2)
+
+
+class F0Fusion(nn.Module):
+    """Fuse encoder output with F0 features by projecting their concatenation.
+
+    The projection starts as the identity on the audio half and as zeros on the
+    F0 half, so at step zero the fused output reproduces the encoder output and
+    the F0 branch has to earn its contribution instead of disturbing the
+    pretrained representation.
+    """
+
+    def __init__(self, audio_dim: int, f0_dim: int):
+        super().__init__()
+        self.proj = nn.Linear(audio_dim + f0_dim, audio_dim)
+        self.norm = nn.LayerNorm(audio_dim)
+        with torch.no_grad():
+            self.proj.weight.zero_()
+            self.proj.weight[:, :audio_dim].copy_(torch.eye(audio_dim))
+            self.proj.bias.zero_()
+
+    def forward(self, audio_features: Tensor, f0_features: Tensor) -> Tensor:
+        return self.norm(self.proj(torch.cat([audio_features, f0_features], dim=-1)))
+
+
 @dataclass
 class ModelDimensions:
     n_mels: int
@@ -402,7 +452,8 @@ class TextDecoder(nn.Module):
 
 
 class Whisper(nn.Module):
-    def __init__(self, dims: ModelDimensions, ctc_vocab: int = 280, n_accents: int = 6, ctc_layers: int = 2):
+    def __init__(self, dims: ModelDimensions, ctc_vocab: int = 280, n_accents: int = 6,
+                 ctc_layers: int = 2, use_f0: bool = False, f0_features: int = 3, f0_dim: int = 256):
         super().__init__()
         self.dims = dims
         self.dims.n_accents = n_accents
@@ -429,6 +480,14 @@ class Whisper(nn.Module):
         # '''
         # self.proj_layer = Linear(self.dims.n_audio_state, ctc_vocab)
         self.ctc_head = CTCHead(vocab_size=ctc_vocab, hidden_size=self.dims.n_audio_state, num_layers=ctc_layers)
+        # Optional F0 branch; absent unless the recipe asks for it, so existing
+        # checkpoints keep loading unchanged.
+        if use_f0:
+            self.f0_encoder = F0Encoder(in_dim=f0_features, out_dim=f0_dim)
+            self.f0_fusion = F0Fusion(self.dims.n_audio_state, f0_dim)
+        else:
+            self.f0_encoder = None
+            self.f0_fusion = None
         self.stct_head = CTCHead(vocab_size=7, hidden_size=self.dims.n_audio_state, num_layers=ctc_layers)
 
         self.accent_classifier = nn.Sequential(

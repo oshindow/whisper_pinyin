@@ -7,6 +7,11 @@ from pathlib import Path
 import os
 import json
 
+from preprocessing.f0_features import load_f0_features
+
+# One encoder frame per two mel frames, so 30 s of audio spans 1500 frames.
+N_ENCODER_FRAMES = whisper.audio.N_FRAMES // 2
+
 
 def _resolve_jsonl_audio(audio_path, data_root):
     path = Path(audio_path)
@@ -128,9 +133,19 @@ class WhisperPinyinDataset(torch.utils.data.Dataset):
         audio = whisper.pad_or_trim(audio.flatten())
         mel = whisper.log_mel_spectrogram(audio, n_mels=n_mels)
         mel_lens = min(round(audio.shape[-1] / 160 + 0.5), 1500)
-        
+
+        # The F0 branch reads the cache written by scripts/extract_f0.py; it
+        # stays off entirely when the recipe does not configure a cache.
+        f0 = None
+        f0_cache_dir = getattr(self.config, "f0_cache_dir", None)
+        if f0_cache_dir:
+            f0 = load_f0_features(
+                audiofile, getattr(self.config, "data_root", "data"),
+                f0_cache_dir, N_ENCODER_FRAMES,
+            )
 
         return {
+            "f0": f0,
             "durations": duration,
             "mel_lens": mel_lens,
             "uids": uid,
@@ -146,7 +161,10 @@ class WhisperPinyinDataset(torch.utils.data.Dataset):
 class WhisperDataCollatorWhithPadding:
     def __call__(self, features):
         durations, uids, input_ids, labels, dec_input_ids, pinyins, mel_lens = [], [], [], [], [], [], []
+        f0s = []
         for f in features:
+            if f.get("f0") is not None:
+                f0s.append(f["f0"])
             durations.append(f["durations"])
             uids.append(f["uids"]) 
             input_ids.append(f["input_ids"])
@@ -175,5 +193,7 @@ class WhisperDataCollatorWhithPadding:
         batch["durations"] = durations
         batch["pinyins"] = pinyins
         batch["mel_lens"] = mel_lens
+        if f0s:
+            batch["f0"] = torch.tensor(np.stack(f0s), dtype=torch.float32)
 
         return batch
