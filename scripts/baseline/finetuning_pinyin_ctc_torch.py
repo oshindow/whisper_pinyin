@@ -10,7 +10,12 @@ import torch.distributed as dist
 import whisper
  
 from pathlib import Path
-from preprocessing.preprocess_pinyin import WhisperPinyinDataset, WhisperDataCollatorWhithPadding
+from preprocessing.preprocess_pinyin import (
+    WhisperPinyinDataset,
+    WhisperDataCollatorWhithPadding,
+    WhisperPairedPinyinDataset,
+    WhisperPairedDataCollator,
+)
 from pytorch_lightning import LightningModule
 from pytorch_lightning import Trainer, seed_everything
 from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
@@ -53,8 +58,12 @@ class WhisperModelModule(LightningModule):
         self.ctc_loss = nn.CTCLoss(blank=0, reduction='mean', zero_infinity=True)
 
         self.cfg = cfg
-        self.train_dataset = WhisperPinyinDataset(self.train_path, self.tokenizer, self.spk_info_path, config=self.cfg, task='train',
-                                             pseudo_labels=getattr(self, 'pseudo_labels', None))
+        if cfg.canonical_ctc_weight > 0:
+            self.train_dataset = WhisperPairedPinyinDataset(self.train_path, config=self.cfg)
+        else:
+            self.train_dataset = WhisperPinyinDataset(
+                self.train_path, self.tokenizer, self.spk_info_path, config=self.cfg, task='train',
+                pseudo_labels=getattr(self, 'pseudo_labels', None))
         
         
         self.lexicon = self.get_lexicon(lexicon_path=cfg.lexicon_path)
@@ -96,11 +105,7 @@ class WhisperModelModule(LightningModule):
     def forward(self, x):
         return self.model(x)
 
-    def training_step(self, batch, batch_id):
-        
-        input_ids = batch["input_ids"]
-        pinyins = batch["pinyins"] 
-        
+    def compute_ctc_loss(self, input_ids, pinyins):
         audio_features,_ = self.model.encoder(input_ids)
         audio_features = self.encoder_dropout(audio_features)
             
@@ -143,18 +148,25 @@ class WhisperModelModule(LightningModule):
 
         
 
-        ctc_loss = self.ctc_loss(
+        return self.ctc_loss(
             log_probs,
             targets,
             output_lengths,
             target_lengths
         )
-        
-         
-         
-        loss = ctc_loss 
+
+    def training_step(self, batch, batch_id):
+        ctc_loss = self.compute_ctc_loss(batch["input_ids"], batch["pinyins"])
+        canonical_ctc_loss = ctc_loss.new_zeros(())
+        if self.cfg.canonical_ctc_weight > 0:
+            canonical_ctc_loss = self.compute_ctc_loss(
+                batch["canonical_input_ids"], batch["canonical_pinyins"])
+        loss = ctc_loss + self.cfg.canonical_ctc_weight * canonical_ctc_loss
         self.log("train/loss", loss, on_step=True, prog_bar=True, logger=True)
         self.log("train/ctc_loss", ctc_loss, on_step=True, prog_bar=True, logger=True)
+        if self.cfg.canonical_ctc_weight > 0:
+            self.log("train/canonical_ctc_loss", canonical_ctc_loss,
+                     on_step=True, prog_bar=True, logger=True)
                 
         return loss
 
@@ -258,7 +270,7 @@ class WhisperModelModule(LightningModule):
     
     def setup(self, stage=None):
         if stage == 'fit' or stage is None:
-            print('total train dataset length:', len(self.train_dataset.datalist))
+            print('total train dataset length:', len(self.train_dataset))
 
     def load_pretrained_whisper(self, model_name, ctc_vocab, ctc_layers):
         # Load the original Whisper model
@@ -269,11 +281,12 @@ class WhisperModelModule(LightningModule):
         return model  # Return the modified model
         
     def train_dataloader(self):
-        
+        collator = (WhisperPairedDataCollator() if self.cfg.canonical_ctc_weight > 0
+                    else WhisperDataCollatorWhithPadding())
         return torch.utils.data.DataLoader(self.train_dataset, 
                           batch_size=self.cfg.batch_size, 
                           drop_last=True, shuffle=True, num_workers=self.cfg.num_worker,
-                          collate_fn=WhisperDataCollatorWhithPadding()
+                          collate_fn=collator
                           )
 
     def val_dataloader(self):
@@ -357,6 +370,18 @@ if __name__ == '__main__':
         help="Root directory used to resolve AISHELL-3 audio paths when manifests contain utterance IDs.",
     )
     parser.add_argument(
+        "--canonical-root",
+        type=str,
+        default="/data2/xintong/datasets/cosyvoice3/cosyvoice3",
+        help="Root containing generated canonical wavs, mirroring the L2 data tree.",
+    )
+    parser.add_argument(
+        "--canonical-ctc-weight",
+        type=float,
+        default=0.0,
+        help="Weight of paired canonical-phone CTC; zero preserves baseline behavior.",
+    )
+    parser.add_argument(
         "--model-name",
         type=str,
         default="small",
@@ -434,6 +459,8 @@ if __name__ == '__main__':
     cfg.train_path = args.train_path
     cfg.val_path = args.val_path
     cfg.data_root = args.data_root
+    cfg.canonical_root = args.canonical_root
+    cfg.canonical_ctc_weight = args.canonical_ctc_weight
     cfg.n_mels = args.n_mels
     cfg.ctc_layers = args.ctc_layers
     cfg.lexicon_path = args.lexicon_path
