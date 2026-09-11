@@ -85,11 +85,12 @@ class CTCHead(nn.Module): #Add commentMore actions
             )
         # layers.append(nn.Linear(hidden_size, vocab_size))
         self.layers = nn.Sequential(*layers) #Add commentMore actions
+        self.final_dropout = nn.Identity()
         self.proj = nn.Linear(hidden_size, vocab_size)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         hidden = self.layers(hidden_states)
-        logits = self.proj(hidden)
+        logits = self.proj(self.final_dropout(hidden))
         return hidden, logits
 
 @dataclass
@@ -227,6 +228,8 @@ class ResidualAttentionBlock(nn.Module):
             Linear(n_state, n_mlp), nn.GELU(), Linear(n_mlp, n_state)
         )
         self.mlp_ln = LayerNorm(n_state)
+        self.attn_dropout = nn.Identity()
+        self.mlp_dropout = nn.Identity()
 
     def forward(
         self,
@@ -235,10 +238,10 @@ class ResidualAttentionBlock(nn.Module):
         mask: Optional[Tensor] = None,
         kv_cache: Optional[dict] = None,
     ):
-        x = x + self.attn(self.attn_ln(x), mask=mask, kv_cache=kv_cache)[0]
+        x = x + self.attn_dropout(self.attn(self.attn_ln(x), mask=mask, kv_cache=kv_cache)[0])
         if self.cross_attn:
             x = x + self.cross_attn(self.cross_attn_ln(x), xa, kv_cache=kv_cache)[0]
-        x = x + self.mlp(self.mlp_ln(x))
+        x = x + self.mlp_dropout(self.mlp(self.mlp_ln(x)))
         return x
 
 class SharedEncoder(nn.Module):

@@ -39,3 +39,19 @@ whisper_pinyin_cr
 
 git_push.sh
 *.html
+
+# Local manifests, audio, checkpoints, logs, and generated evaluation outputs.
+*.jsonl
+*.wav
+*.WAV
+*.ckpt
+events.out.tfevents.*
+reports/
+results/whisper_pinyin_ctc*/
+data/jsonl_actual_split/
+
+# Small, reproducible phone vocabulary required by the JSONL CTC recipes.
+!data/lang_jsonl/
+data/lang_jsonl/*
+!data/lang_jsonl/lexicon.txt
+!data/lang_jsonl/tokens.txt

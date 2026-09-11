@@ -5,6 +5,24 @@ import whisper
 import numpy as np
 from pathlib import Path
 import os
+import json
+
+
+def _resolve_jsonl_audio(audio_path, data_root):
+    path = Path(audio_path)
+    if path.is_file():
+        return path
+    marker = '/datasets/datasets/'
+    normalized = str(path).replace('\\', '/')
+    if marker in normalized:
+        relative = normalized.split(marker, 1)[1]
+        candidates = [Path(data_root) / relative]
+        if relative == 'LATIC' or relative.startswith('LATIC/'):
+            candidates.append(Path(data_root) / 'magichub_multiaccent' / relative)
+        for candidate in candidates:
+            if candidate.is_file():
+                return candidate
+    return path
 
 def get_data_lists(text_path, task='train', data_root='data'):
     """Read a manifest with one sample per line.
@@ -22,6 +40,12 @@ def get_data_lists(text_path, task='train', data_root='data'):
         for line in input_file:
             line = line.strip()
             if not line:
+                continue
+            if text_path.suffix == '.jsonl':
+                item = json.loads(line)
+                audio_path = _resolve_jsonl_audio(item['l2_wav'], data_root)
+                phones = [p for p in item['actual_phones'] if p not in ('sil', None)]
+                samples.append('|'.join([str(audio_path), ' '.join(phones)]))
                 continue
             if '|' in line:
                 samples.append(line)

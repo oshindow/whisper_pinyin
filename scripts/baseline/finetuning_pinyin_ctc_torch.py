@@ -6,28 +6,23 @@ sys.path.insert(0, str(ROOT))
 
 import torch
 import torch.nn as nn
+import torch.distributed as dist
 import whisper
  
 from pathlib import Path
-from utils import error_stats 
 from preprocessing.preprocess_pinyin import WhisperPinyinDataset, WhisperDataCollatorWhithPadding
 from pytorch_lightning import LightningModule
 from pytorch_lightning import Trainer, seed_everything
 from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
 from pytorch_lightning.loggers import TensorBoardLogger
 from transformers import WhisperTokenizer
-from transformers import (
-    AdamW,
-    get_cosine_schedule_with_warmup
-)
+from torch.optim import AdamW
+from torch.optim.lr_scheduler import LambdaLR
 
 from config import Config
  
 import k2
 
-from graph_compiler import CtcTrainingGraphCompiler
- 
- 
 import random
 import numpy as np
 import argparse
@@ -48,33 +43,44 @@ class WhisperModelModule(LightningModule):
         super().__init__()
 
         self.tokenizer = WhisperTokenizer.from_pretrained("openai/whisper-large-v3-turbo", language=lang, task="transcribe")
-        self.model = self.load_pretrained_whisper(model_name, ctc_vocab=280, ctc_layers=cfg.ctc_layers)
+        self.model = self.load_pretrained_whisper(model_name, ctc_vocab=cfg.vocab_size, ctc_layers=cfg.ctc_layers)
 
         self.train_path = cfg.train_path
         self.val_path = cfg.val_path
         self.test_path = cfg.test_path
         self.spk_info_path = cfg.spk_info_path
         
-        self.ctc_loss = nn.CTCLoss(blank=0, reduction='mean', zero_infinity=False)
+        self.ctc_loss = nn.CTCLoss(blank=0, reduction='mean', zero_infinity=True)
 
         self.cfg = cfg
         self.train_dataset = WhisperPinyinDataset(self.train_path, self.tokenizer, self.spk_info_path, config=self.cfg, task='train',
                                              pseudo_labels=getattr(self, 'pseudo_labels', None))
         
         
-        self.lexicon = self.get_lexicon(lexicon_path='data/lang_whisper/lexicon_add_plus_new.txt')
-        self.token_table_tight = k2.SymbolTable.from_file(Path('data/whisper') / "tokens.txt")
-        print(Path('data/whisper') / "tokens.txt")
+        self.lexicon = self.get_lexicon(lexicon_path=cfg.lexicon_path)
+        self.token_table_tight = k2.SymbolTable.from_file(cfg.token_table_path)
+        print(cfg.token_table_path)
 
-        self.graph_compiler = CtcTrainingGraphCompiler(
-            'data/whisper',
-            device=self.device,
-            tokenizer=self.tokenizer,
-        )
+        # This recipe is encoder-only. Remove Whisper's unused decoder and
+        # auxiliary heads before DDP wraps the module.
+        for name in ("decoder", "stct_head", "accent_classifier", "acc_head",
+                     "accent_embedding", "decoder_projection"):
+            if hasattr(self.model, name):
+                setattr(self.model, name, None)
 
-        
+        # The convolutional feature frontend is permanently frozen. Transformer
+        # blocks remain in DDP from the start and are frozen by LR=0 for 10k steps.
+        for parameter in list(self.model.encoder.conv1.parameters()) + list(self.model.encoder.conv2.parameters()):
+            parameter.requires_grad = False
 
-        self.decoding_graph = None
+        for block in self.model.encoder.blocks:
+            block.attn_dropout = nn.Dropout(cfg.dropout)
+            block.mlp_dropout = nn.Dropout(cfg.dropout)
+        self.encoder_dropout = nn.Dropout(cfg.dropout)
+        self.model.ctc_head.final_dropout = nn.Dropout(cfg.dropout)
+
+        self.register_buffer("val_errors", torch.tensor(0, dtype=torch.long), persistent=False)
+        self.register_buffer("val_ref_phones", torch.tensor(0, dtype=torch.long), persistent=False)
         
 
     def get_lexicon(self, lexicon_path):
@@ -96,6 +102,7 @@ class WhisperModelModule(LightningModule):
         pinyins = batch["pinyins"] 
         
         audio_features,_ = self.model.encoder(input_ids)
+        audio_features = self.encoder_dropout(audio_features)
             
         # ctc head
         _, nnet_output = self.model.ctc_head(audio_features)
@@ -105,6 +112,8 @@ class WhisperModelModule(LightningModule):
         
         ctc_labels = []
         for sentence in pinyins:
+            # torch.nn.CTCLoss does not add boundary symbols. Keep exactly one
+            # <sos/eos> at each end; k2 graph compilation is not used here.
             sentence_labels = [self.token_table_tight['<sos/eos>']]
             for word in sentence.split(' '):
                 if word not in self.lexicon:
@@ -150,7 +159,6 @@ class WhisperModelModule(LightningModule):
         return loss
 
     def validation_step(self, batch, batch_id):
-        uids = batch["uids"]
         input_ids = batch["input_ids"]
         pinyins = batch["pinyins"] 
         with torch.no_grad():
@@ -159,9 +167,9 @@ class WhisperModelModule(LightningModule):
 
         texts = self.ctc_decode(nnet_output, pinyins)
         
-        cer_results = []
-        for u, o, l in zip(uids, texts, pinyins):
-            o_list = o
+        errors = 0
+        ref_phones = 0
+        for o, l in zip(texts, pinyins):
             l_list = []
             for word in l.split(' '):
                 if word not in self.lexicon:
@@ -170,75 +178,87 @@ class WhisperModelModule(LightningModule):
                 for piece in self.lexicon[word]:
                     l_list.append(piece)
              
-            cer_results.append((u, l_list, o_list))
+            errors += self.edit_distance(l_list, o)
+            ref_phones += len(l_list)
+        self.val_errors += errors
+        self.val_ref_phones += ref_phones
 
-        cer = error_stats(f=None, test_set_name="val", results=cer_results, compute_CER=False, sclite_mode=False, enable_log=False)
-        
-        self.log("val/cer", cer, on_step=True, prog_bar=True, logger=True)
-   
-     
-        return {
-            "cer": cer,
-        }
+    def on_validation_epoch_start(self):
+        self.val_errors.zero_()
+        self.val_ref_phones.zero_()
+
+    def on_validation_epoch_end(self):
+        totals = torch.stack((self.val_errors, self.val_ref_phones))
+        if dist.is_available() and dist.is_initialized():
+            dist.all_reduce(totals, op=dist.ReduceOp.SUM)
+        per = 100.0 * totals[0].float() / totals[1].clamp_min(1)
+        self.log("val/per", per, prog_bar=True, logger=True, sync_dist=False)
+
+    @staticmethod
+    def edit_distance(ref, hyp):
+        previous = list(range(len(hyp) + 1))
+        for i, ref_phone in enumerate(ref, 1):
+            current = [i]
+            for j, hyp_phone in enumerate(hyp, 1):
+                current.append(min(current[-1] + 1, previous[j] + 1,
+                                   previous[j - 1] + (ref_phone != hyp_phone)))
+            previous = current
+        return previous[-1]
     
     def ctc_decode(self, logits, pinyins):
         class_indices = logits.argmax(dim=2)
         texts = []
         idx = 0
         for seq in class_indices:
-            # Remove blanks (pad tokens)
-            seq_no_blank = seq[seq != 0]
-            # Collapse repeats
             seq_collapsed = []
             prev_token = -1
-            for token in seq_no_blank:
-                if token != prev_token:
+            # Standard CTC: collapse repeats first, then remove blank/specials.
+            for token in seq:
+                if token != prev_token and token.item() not in (0, 1, 2):
                     seq_collapsed.append(token.item())
-                    prev_token = token
+                prev_token = token
             
             # Decode to text
-            text = [self.token_table_tight._id2sym[i] for i in seq_collapsed if i != 1]
+            text = [self.token_table_tight._id2sym[i] for i in seq_collapsed]
             texts.append(text)
             idx += 1
         return texts
     
     def configure_optimizers(self):
-        model = self.model
-        no_decay = ["bias", "LayerNorm.weight"]
-        optimizer_grouped_parameters = [
-            {
-                "params": [p for n, p in model.named_parameters() 
-                            if not any(nd in n for nd in no_decay)],
-                "weight_decay": self.cfg.weight_decay,
-            },
-            {
-                "params": [p for n, p in model.named_parameters() 
-                            if any(nd in n for nd in no_decay)],
-                "weight_decay": 0.0,
-            },
-        ]
-
-        optimizer = AdamW(optimizer_grouped_parameters, 
-                          lr=self.cfg.learning_rate, 
-                          eps=self.cfg.adam_epsilon)
+        backbone = [p for name, p in self.model.encoder.named_parameters()
+                    if p.requires_grad and not name.startswith(("conv1.", "conv2."))]
+        head = list(self.model.ctc_head.parameters())
+        optimizer = AdamW(
+            [{"params": backbone, "name": "backbone"},
+             {"params": head, "name": "ctc_head"}],
+            lr=self.cfg.learning_rate, betas=(0.9, 0.98),
+            eps=self.cfg.adam_epsilon, weight_decay=0.0,
+        )
         self.optimizer = optimizer
 
-        scheduler = get_cosine_schedule_with_warmup(
-            optimizer, num_warmup_steps=self.cfg.warmup_steps, 
-            num_training_steps=self.t_total
-        )
+        def head_lr(step):
+            if step < self.cfg.head_warmup_steps:
+                return step / max(1, self.cfg.head_warmup_steps)
+            return max(0.0, (self.cfg.max_steps - step) /
+                       max(1, self.cfg.max_steps - self.cfg.head_warmup_steps))
+
+        def backbone_lr(step):
+            if step < self.cfg.freeze_backbone_steps:
+                return 0.0
+            ramp_end = self.cfg.freeze_backbone_steps + self.cfg.backbone_ramp_steps
+            if step < ramp_end:
+                return (step - self.cfg.freeze_backbone_steps) / max(1, self.cfg.backbone_ramp_steps)
+            return max(0.0, (self.cfg.max_steps - step) /
+                       max(1, self.cfg.max_steps - ramp_end))
+
+        scheduler = LambdaLR(optimizer, lr_lambda=[backbone_lr, head_lr])
         self.scheduler = scheduler
 
         return [optimizer], [{"scheduler": scheduler, "interval": "step", "frequency": 1}]
     
     def setup(self, stage=None):
         if stage == 'fit' or stage is None:
-            print('totol train dataset length:', len(self.train_dataset.datalist))
-            self.t_total = (
-                (len(self.train_dataset.datalist) // (self.cfg.batch_size))
-                // self.cfg.gradient_accumulation_steps
-                * float(self.cfg.num_train_epochs)
-            )
+            print('total train dataset length:', len(self.train_dataset.datalist))
 
     def load_pretrained_whisper(self, model_name, ctc_vocab, ctc_layers):
         # Load the original Whisper model
@@ -316,6 +336,20 @@ if __name__ == '__main__':
         default="train_data_clean_sub0.04_ins0.03_del0.03",
         help="Batch size for training",
     )
+    parser.add_argument("--val-path", type=str, default=Config.val_path)
+    parser.add_argument("--lexicon-path", type=str, default=Config.lexicon_path)
+    parser.add_argument("--token-table-path", type=str, default=Config.token_table_path)
+    parser.add_argument("--ctc-vocab", type=int, default=Config.vocab_size)
+    parser.add_argument("--devices", type=int, default=1)
+    parser.add_argument("--strategy", type=str, default="auto")
+    parser.add_argument("--gradient-accumulation-steps", type=int, default=1)
+    parser.add_argument("--max-steps", type=int, default=30000)
+    parser.add_argument("--freeze-backbone-steps", type=int, default=10000)
+    parser.add_argument("--head-warmup-steps", type=int, default=3000)
+    parser.add_argument("--backbone-ramp-steps", type=int, default=3000)
+    parser.add_argument("--eval-steps", type=int, default=1000)
+    parser.add_argument("--dropout", type=float, default=0.1)
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--data-root",
         type=str,
@@ -398,9 +432,21 @@ if __name__ == '__main__':
     cfg.initial_self_loop_weight = args.initial_self_loop_weight
     cfg.batch_size = args.batch_size
     cfg.train_path = args.train_path
+    cfg.val_path = args.val_path
     cfg.data_root = args.data_root
     cfg.n_mels = args.n_mels
     cfg.ctc_layers = args.ctc_layers
+    cfg.lexicon_path = args.lexicon_path
+    cfg.token_table_path = args.token_table_path
+    cfg.vocab_size = args.ctc_vocab
+    cfg.num_devices = args.devices
+    cfg.gradient_accumulation_steps = args.gradient_accumulation_steps
+    cfg.max_steps = args.max_steps
+    cfg.freeze_backbone_steps = args.freeze_backbone_steps
+    cfg.head_warmup_steps = args.head_warmup_steps
+    cfg.backbone_ramp_steps = args.backbone_ramp_steps
+    cfg.eval_steps = args.eval_steps
+    cfg.dropout = args.dropout
     cfg.learning_rate = args.learning_rate
     cfg.weight_decay = args.weight_decay
     cfg.adam_epsilon = args.adam_epsilon
@@ -419,24 +465,38 @@ if __name__ == '__main__':
 
     checkpoint_callback = ModelCheckpoint(
         dirpath=f"{check_output_dir}",
-        filename="checkpoint-{epoch:04d}",
-        save_top_k=-1 # all model save
+        filename="checkpoint-step={step:06d}-per={val/per:.2f}",
+        monitor="val/per",
+        mode="min",
+        save_top_k=2,
+        save_last=True,
+        auto_insert_metric_name=False,
+        save_on_train_epoch_end=False,
     )
 
-    callback_list = [checkpoint_callback, LearningRateMonitor(logging_interval="epoch")]
+    seed_everything(args.seed, workers=True)
+    callback_list = [checkpoint_callback, LearningRateMonitor(logging_interval="step")]
     model = WhisperModelModule(cfg, model_name, lang)
 
     DEVICE = "gpu" if torch.cuda.is_available() else "cpu"
 
-    seed_everything(2025, workers=True)
     trainer = Trainer(
         precision=args.precision,
         accelerator=DEVICE,
-        max_epochs=cfg.num_train_epochs,
+        devices=args.devices if DEVICE == "gpu" else 1,
+        strategy=args.strategy if DEVICE == "gpu" else "auto",
+        max_steps=cfg.max_steps,
+        max_epochs=-1,
         accumulate_grad_batches=cfg.gradient_accumulation_steps,
+        gradient_clip_val=1.0,
+        gradient_clip_algorithm="norm",
         logger=tflogger,
         callbacks=callback_list,
-        val_check_interval=0.3
+        # One virtual epoch is exactly 1000 optimizer steps, so validation and
+        # checkpointing occur on the requested optimizer-step boundary.
+        limit_train_batches=cfg.eval_steps * cfg.gradient_accumulation_steps,
+        val_check_interval=1.0,
+        check_val_every_n_epoch=1,
     )
 
     trainer.fit(model)

@@ -157,7 +157,7 @@ def load_model(
         if name not in _MODELS:
             # print("load model from local", checkpoint.keys())
             # for small model
-            checkpoint["dims"] = {'n_mels': 80, 'n_vocab': 51865, 'n_audio_ctx': 1500, 'n_audio_state': 768, 'n_audio_head': 12, 'n_audio_layer': 12, 'n_text_ctx': 448, 'n_text_state': 768, 'n_text_head': 12, 'n_text_layer': 12}
+            checkpoint["dims"] = None
             # for turbo model
             # checkpoint["dims"] = {'n_mels': 128, 'n_vocab': 51866, 'n_audio_ctx': 1500, 'n_audio_state': 1280, 'n_audio_head': 20, 'n_audio_layer': 32, 'n_text_ctx': 448, 'n_text_state': 1280, 'n_text_head': 20, 'n_text_layer': 4}
             
@@ -177,6 +177,30 @@ def load_model(
                 new_key = key.replace('model.', '')
                 checkpoint["model_state_dict"][new_key] = values 
 
+            state = checkpoint["model_state_dict"]
+            audio_state, n_mels = state["encoder.conv1.weight"].shape[:2]
+            audio_layers = len({key.split('.')[2] for key in state if key.startswith("encoder.blocks.")})
+            encoder_only = "decoder.token_embedding.weight" not in state
+            if encoder_only:
+                text_vocab = 51865 if n_mels == 80 else 51866
+                text_state = audio_state
+                text_layers = audio_layers
+            else:
+                text_vocab, text_state = state["decoder.token_embedding.weight"].shape
+                text_layers = len({key.split('.')[2] for key in state if key.startswith("decoder.blocks.")})
+            checkpoint["dims"] = {
+                "n_mels": n_mels,
+                "n_audio_ctx": state["encoder.positional_embedding"].shape[0],
+                "n_audio_state": audio_state,
+                "n_audio_head": audio_state // 64,
+                "n_audio_layer": audio_layers,
+                "n_vocab": text_vocab,
+                "n_text_ctx": 448 if encoder_only else state["decoder.positional_embedding"].shape[0],
+                "n_text_state": text_state,
+                "n_text_head": text_state // 64,
+                "n_text_layer": text_layers,
+            }
+
     del checkpoint_file
 
     dims = ModelDimensions(**checkpoint["dims"])
@@ -184,8 +208,18 @@ def load_model(
     # for key, values in checkpoint["model_state_dict"].items():
         # if 'ctc_head' in key:
             # print(key)
-    # model = Whisper(dims, ctc_vocab=ctc_vocab, ctc_layers=ctc_layers, n_accents=n_accents)
-    model = Whisper(dims)
+    # Forward the CTC head config; falling back to Whisper's own defaults when
+    # the caller left them unset, so the head width matches the token table.
+    ctc_kwargs = {"n_accents": n_accents}
+    if ctc_vocab is not None:
+        ctc_kwargs["ctc_vocab"] = ctc_vocab
+    if ctc_layers is not None:
+        ctc_kwargs["ctc_layers"] = ctc_layers
+    model = Whisper(dims, **ctc_kwargs)
+    if name not in _MODELS and "decoder.token_embedding.weight" not in checkpoint["model_state_dict"]:
+        for module_name in ("decoder", "stct_head", "accent_classifier", "acc_head",
+                            "accent_embedding", "decoder_projection"):
+            setattr(model, module_name, None)
     print(dims)
     # print(checkpoint["model_state_dict"])
     model.load_state_dict(checkpoint["model_state_dict"], strict=False)
