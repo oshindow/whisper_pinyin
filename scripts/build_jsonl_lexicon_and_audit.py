@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from preprocessing.phone_units import split_phone
+from preprocessing.audio_paths import resolve_audio_path
 
 
 SPECIAL_TOKENS = ("<blk>", "<sos/eos>", "<unk>")
@@ -26,26 +27,6 @@ def read_jsonl(path):
                 yield json.loads(line)
             except json.JSONDecodeError as exc:
                 raise ValueError(f"Invalid JSON in {path}:{line_number}: {exc}") from exc
-
-
-def resolve_audio_path(raw_path, data_root):
-    path = Path(raw_path)
-    if path.is_file() or data_root is None:
-        return path
-
-    marker = "/datasets/datasets/"
-    normalized = str(path).replace("\\", "/")
-    if marker in normalized:
-        relative = normalized.split(marker, 1)[1]
-        candidates = [data_root / relative]
-        # Older manifests place LATIC directly below datasets/datasets, while
-        # the restored corpus lives alongside the other MagicHub corpora.
-        if relative == "LATIC" or relative.startswith("LATIC/"):
-            candidates.append(data_root / "magichub_multiaccent" / relative)
-        for candidate in candidates:
-            if candidate.is_file():
-                return candidate
-    return path
 
 
 def main():

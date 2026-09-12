@@ -13,21 +13,7 @@ from preprocessing.f0_features import load_f0_features
 N_ENCODER_FRAMES = whisper.audio.N_FRAMES // 2
 
 
-def _resolve_jsonl_audio(audio_path, data_root):
-    path = Path(audio_path)
-    if path.is_file():
-        return path
-    marker = '/datasets/datasets/'
-    normalized = str(path).replace('\\', '/')
-    if marker in normalized:
-        relative = normalized.split(marker, 1)[1]
-        candidates = [Path(data_root) / relative]
-        if relative == 'LATIC' or relative.startswith('LATIC/'):
-            candidates.append(Path(data_root) / 'magichub_multiaccent' / relative)
-        for candidate in candidates:
-            if candidate.is_file():
-                return candidate
-    return path
+from preprocessing.audio_paths import resolve_audio_path as _resolve_jsonl_audio
 
 def get_data_lists(text_path, task='train', data_root='data'):
     """Read a manifest with one sample per line.

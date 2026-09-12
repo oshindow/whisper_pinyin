@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Auxiliary voiced log-F0 regression from the pre-fusion Whisper features.
 # Two-stage recipe with the original tonal-final units (188 tokens) plus an F0
 # branch: WORLD harvest tracks are pre-extracted, encoded by a small conv stack
 # and fused with the Whisper encoder output before the CTC head.
@@ -48,7 +49,7 @@ fi
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}" \
 "$PYTHON_BIN" scripts/baseline/finetuning_pinyin_ctc_torch.py \
   --data-root "$DATA_ROOT" \
-  --train-name whisper_pinyin_ctc_medium_actual_f0_twostage \
+  --train-name whisper_pinyin_ctc_medium_actual_f0loss_twostage \
   --train-id 001 \
   --exp-dir "$EXP_DIR" \
   --train-path "$SPLIT_DIR/train.jsonl" \
@@ -58,6 +59,7 @@ CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}" \
   --ctc-vocab "$CTC_VOCAB" \
   --f0-cache-dir "$F0_CACHE" \
   --f0-dim 256 \
+  --f0-loss-weight "${F0_LOSS_WEIGHT:-0.1}" \
   --model-name medium \
   --ctc-layers 2 \
   --n_mels 80 \

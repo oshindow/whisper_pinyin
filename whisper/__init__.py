@@ -227,7 +227,13 @@ def load_model(
             setattr(model, module_name, None)
     print(dims)
     # print(checkpoint["model_state_dict"])
-    model.load_state_dict(checkpoint["model_state_dict"], strict=False)
+    state = checkpoint["model_state_dict"]
+    if "f0_head.proj.weight" in state:
+        from .model import CTCHead
+        model.f0_head = CTCHead(dims.n_audio_state, 1, 2)
+        model.f0_head.load_state_dict({k[len("f0_head."):]: v for k, v in state.items()
+                                       if k.startswith("f0_head.")}, strict=True)
+    model.load_state_dict(state, strict=False)
 
     if alignment_heads is not None:
         model.set_alignment_heads(alignment_heads)

@@ -55,7 +55,7 @@ def _extract_one(audio_path):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifests", nargs="+", required=True)
-    parser.add_argument("--data-root", default="/data2/xintong/mandarin_accent")
+    parser.add_argument("--data-root", default="/data2/xintong/datasets/datasets")
     parser.add_argument("--cache-dir", default="/data2/xintong/f0_cache_world")
     parser.add_argument("--jobs", type=int, default=32)
     parser.add_argument("--frame-period", type=float, default=FRAME_PERIOD_MS)
@@ -63,6 +63,12 @@ def main():
     parser.add_argument("--f0-ceil", type=float, default=F0_CEIL)
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
+    # Fail once before starting workers instead of rejecting every utterance.
+    try:
+        import pyworld
+    except ImportError as exc:
+        parser.error(f"Cannot import pyworld: {exc}. Install F0 dependencies in "
+                     f"{sys.executable} using requirements-f0.txt (see TWO_STAGE.md).")
 
     paths = []
     seen = set()

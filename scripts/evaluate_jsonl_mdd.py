@@ -219,7 +219,7 @@ def main():
                             collate_fn=collate, pin_memory=True)
         local_rows = []
         with torch.inference_mode():
-            for rows, mels, f0 in loader:
+            for batch_index, (rows, mels, f0) in enumerate(loader, 1):
                 with torch.autocast(device_type="cuda", dtype=torch.bfloat16,
                                     enabled=device.type == "cuda"):
                     features, _ = model.encoder(mels.to(device, non_blocking=True))
@@ -230,6 +230,8 @@ def main():
                 for row, prediction in zip(rows, ctc_decode(logits, tokens, finals)):
                     row["predicted_phones"] = prediction
                     local_rows.append(row)
+                if batch_index % 25 == 0 or batch_index == len(loader):
+                    print(f"{Path(manifest).stem} rank={rank}: {len(local_rows)}/{len(dataset)} utterances", flush=True)
 
         gathered = [None] * world_size if rank == 0 else None
         if world_size > 1:

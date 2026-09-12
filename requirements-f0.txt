@@ -1,0 +1,3 @@
+# Optional WORLD F0 extraction dependencies for the Python 3.8 training env.
+Cython==0.29.37
+pyworld==0.3.4

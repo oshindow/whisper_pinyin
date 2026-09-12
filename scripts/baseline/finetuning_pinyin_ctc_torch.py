@@ -8,6 +8,8 @@ import torch
 import torch.nn as nn
 import torch.distributed as dist
 import whisper
+from whisper.model import CTCHead
+from preprocessing.f0_loss import f0_loss_stats
  
 from pathlib import Path
 from preprocessing.phone_units import finals_from_lexicon, merge_units
@@ -57,6 +59,13 @@ class WhisperModelModule(LightningModule):
         self.ctc_loss = nn.CTCLoss(blank=0, reduction='mean', zero_infinity=True)
 
         self.cfg = cfg
+        self.f0_loss_weight = getattr(cfg, "f0_loss_weight", 0.0)
+        if self.f0_loss_weight > 0:
+            if not getattr(cfg, "use_f0", False):
+                raise ValueError("F0 loss requires --f0-cache-dir")
+            self.model.f0_head = CTCHead(self.model.dims.n_audio_state, 1, 2)
+        self.save_hyperparameters({"f0_loss_weight": self.f0_loss_weight,
+                                   "f0_target": "utterance_normalized_log_f0_voiced"})
         self.train_dataset = WhisperPinyinDataset(self.train_path, self.tokenizer, self.spk_info_path, config=self.cfg, task='train',
                                              pseudo_labels=getattr(self, 'pseudo_labels', None))
         
@@ -85,6 +94,7 @@ class WhisperModelModule(LightningModule):
         self.encoder_dropout = nn.Dropout(cfg.dropout)
         self.model.ctc_head.final_dropout = nn.Dropout(cfg.dropout)
 
+        self.register_buffer("val_f0_stats", torch.zeros(3, dtype=torch.float64), persistent=False)
         self.register_buffer("val_errors", torch.tensor(0, dtype=torch.long), persistent=False)
         self.register_buffer("val_ref_phones", torch.tensor(0, dtype=torch.long), persistent=False)
         
@@ -102,19 +112,25 @@ class WhisperModelModule(LightningModule):
     def forward(self, x):
         return self.model(x)
 
-    def encode(self, batch):
+    def encode(self, batch, return_f0_prediction=False):
         """Encoder output, fused with the F0 branch when the recipe enables it."""
         audio_features, _ = self.model.encoder(batch["input_ids"])
+        prediction = None
+        if return_f0_prediction and self.f0_loss_weight > 0:
+            # Predict before fusion so the head cannot simply copy F0 input.
+            _, prediction = self.model.f0_head(audio_features)
+            prediction = prediction.squeeze(-1)
         if self.model.f0_encoder is not None:
             f0 = batch["f0"].to(device=audio_features.device, dtype=audio_features.dtype)
             audio_features = self.model.f0_fusion(audio_features, self.model.f0_encoder(f0))
-        return audio_features
+        return (audio_features, prediction) if return_f0_prediction else audio_features
 
     def training_step(self, batch, batch_id):
         
         pinyins = batch["pinyins"]
 
-        audio_features = self.encoder_dropout(self.encode(batch))
+        audio_features, f0_prediction = self.encode(batch, return_f0_prediction=True)
+        audio_features = self.encoder_dropout(audio_features)
             
         # ctc head
         _, nnet_output = self.model.ctc_head(audio_features)
@@ -164,7 +180,12 @@ class WhisperModelModule(LightningModule):
         
          
          
-        loss = ctc_loss 
+        loss = ctc_loss
+        if f0_prediction is not None:
+            error, _, count = f0_loss_stats(f0_prediction, batch["f0"])
+            f0_loss = error / count.clamp_min(1)
+            loss = loss + self.f0_loss_weight * f0_loss
+            self.log("train/f0_loss", f0_loss, on_step=True, logger=True)
         self.log("train/loss", loss, on_step=True, prog_bar=True, logger=True)
         self.log("train/ctc_loss", ctc_loss, on_step=True, prog_bar=True, logger=True)
                 
@@ -173,7 +194,11 @@ class WhisperModelModule(LightningModule):
     def validation_step(self, batch, batch_id):
         pinyins = batch["pinyins"]
         with torch.no_grad():
-            _, nnet_output = self.model.ctc_head(self.encode(batch))
+            features, prediction = self.encode(batch, return_f0_prediction=True)
+            _, nnet_output = self.model.ctc_head(features)
+            if prediction is not None:
+                self.val_f0_stats += torch.stack(f0_loss_stats(prediction, batch["f0"])).detach().double()
+
 
         texts = self.ctc_decode(nnet_output, pinyins)
         
@@ -193,6 +218,7 @@ class WhisperModelModule(LightningModule):
         self.val_ref_phones += ref_phones
 
     def on_validation_epoch_start(self):
+        self.val_f0_stats.zero_()
         self.val_errors.zero_()
         self.val_ref_phones.zero_()
 
@@ -202,6 +228,14 @@ class WhisperModelModule(LightningModule):
             dist.all_reduce(totals, op=dist.ReduceOp.SUM)
         per = 100.0 * totals[0].float() / totals[1].clamp_min(1)
         self.log("val/per", per, prog_bar=True, logger=True, sync_dist=False)
+
+        if self.f0_loss_weight > 0:
+            stats = self.val_f0_stats.clone()
+            if dist.is_available() and dist.is_initialized():
+                dist.all_reduce(stats, op=dist.ReduceOp.SUM)
+            self.log("val/f0_loss", stats[0] / stats[2].clamp_min(1), sync_dist=False)
+            self.log("val/f0_mae", stats[1] / stats[2].clamp_min(1), sync_dist=False)
+            self.log("val/f0_voiced_frames", stats[2], sync_dist=False)
 
     @staticmethod
     def edit_distance(ref, hyp):
@@ -237,7 +271,7 @@ class WhisperModelModule(LightningModule):
         backbone = [p for name, p in self.model.encoder.named_parameters()
                     if p.requires_grad and not name.startswith(("conv1.", "conv2."))]
         head = list(self.model.ctc_head.parameters())
-        for module in (self.model.f0_encoder, self.model.f0_fusion):
+        for module in (self.model.f0_encoder, self.model.f0_fusion, getattr(self.model, "f0_head", None)):
             if module is not None:
                 head += list(module.parameters())
         optimizer = AdamW(
@@ -366,6 +400,8 @@ if __name__ == '__main__':
         "--f0-cache-dir", type=str, default=None,
         help="Directory of cached WORLD F0 tracks; enables the F0 branch when set.",
     )
+    parser.add_argument("--f0-loss-weight", type=float, default=0.0,
+                        help="Weight of voiced normalized log-F0 Smooth L1 loss; 0 disables it.")
     parser.add_argument("--f0-dim", type=int, default=256)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
@@ -430,6 +466,10 @@ if __name__ == '__main__':
     )
 
     args = parser.parse_args()
+    if not np.isfinite(args.f0_loss_weight) or args.f0_loss_weight < 0:
+        parser.error("--f0-loss-weight must be finite and nonnegative")
+    if args.f0_loss_weight > 0 and not args.f0_cache_dir:
+        parser.error("--f0-loss-weight requires --f0-cache-dir")
     train_name = args.train_name
     train_id = args.train_id
     model_name = args.model_name
@@ -468,6 +508,7 @@ if __name__ == '__main__':
     cfg.f0_cache_dir = args.f0_cache_dir
     cfg.use_f0 = args.f0_cache_dir is not None
     cfg.f0_dim = args.f0_dim
+    cfg.f0_loss_weight = args.f0_loss_weight
     cfg.learning_rate = args.learning_rate
     cfg.weight_decay = args.weight_decay
     cfg.adam_epsilon = args.adam_epsilon
