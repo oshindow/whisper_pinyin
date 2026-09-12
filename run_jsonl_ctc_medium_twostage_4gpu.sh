@@ -21,7 +21,7 @@ EXP_DIR="/data2/xintong/checkpoints"
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}" \
 "$PYTHON_BIN" scripts/baseline/finetuning_pinyin_ctc_torch.py \
   --data-root "$DATA_ROOT" \
-  --train-name whisper_pinyin_ctc_medium_actual_twostage \
+  --train-name whisper_pinyin_ctc_medium_actual_twostage_specaug \
   --train-id 001 \
   --exp-dir "$EXP_DIR" \
   --train-path "$SPLIT_DIR/train.jsonl" \
@@ -44,6 +44,10 @@ CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}" \
   --backbone-ramp-steps 3000 \
   --eval-steps 1000 \
   --dropout 0.1 \
+  --mask-time-prob 0.65 \
+  --mask-time-length 10 \
+  --mask-feature-prob 0.25 \
+  --mask-feature-length 64 \
   --seed 42 \
   --devices 4 \
   --strategy ddp
