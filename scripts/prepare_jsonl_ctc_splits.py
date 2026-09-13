@@ -13,7 +13,23 @@ sys.path.insert(0, str(ROOT))
 
 import torchaudio
 
-from preprocessing.preprocess_pinyin import _resolve_jsonl_audio
+
+def _resolve_jsonl_audio(audio_path, data_root):
+    """Resolve relocated dataset paths without importing the Whisper stack."""
+    path = Path(audio_path)
+    if path.is_file():
+        return path
+    marker = "/datasets/datasets/"
+    normalized = str(path).replace("\\", "/")
+    if marker in normalized:
+        relative = normalized.split(marker, 1)[1]
+        candidates = [Path(data_root) / relative]
+        if relative == "LATIC" or relative.startswith("LATIC/"):
+            candidates.append(Path(data_root) / "magichub_multiaccent" / relative)
+        for candidate in candidates:
+            if candidate.is_file():
+                return candidate
+    return path
 
 
 def main():
