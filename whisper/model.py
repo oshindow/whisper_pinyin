@@ -343,6 +343,11 @@ class AudioEncoder(nn.Module):
         x = F.gelu(self.conv1(x))
         x_in = F.gelu(self.conv2(x))
         x = x_in.permute(0, 2, 1)
+        # Fine-tuning recipes may attach a training-only SpecAugment module.
+        # Apply it to frozen-CNN features before positions and Transformer.
+        spec_augment = getattr(self, "spec_augment", None)
+        if spec_augment is not None:
+            x = spec_augment(x)
         # x = x_in
         # print("x shape after conv:", x.shape, "self.positional_embedding shape:", self.positional_embedding.shape)
         assert x.shape[1:] == self.positional_embedding.shape, "incorrect audio shape"

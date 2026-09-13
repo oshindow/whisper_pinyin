@@ -27,6 +27,47 @@ import random
 import numpy as np
 import argparse
 
+
+class Wav2Vec2StyleSpecAugment(nn.Module):
+    """Contiguous time/channel masking on latent CNN features."""
+
+    def __init__(self, time_prob=0.65, time_length=10,
+                 feature_prob=0.25, feature_length=64):
+        super().__init__()
+        self.time_prob = time_prob
+        self.time_length = time_length
+        self.feature_prob = feature_prob
+        self.feature_length = feature_length
+
+    @staticmethod
+    def _mask_axis(x, axis, probability, length):
+        axis_size = x.shape[axis]
+        length = min(length, axis_size)
+        if probability <= 0 or length <= 0:
+            return x
+        epsilon = torch.rand((), device=x.device)
+        spans = int((probability * axis_size / length + epsilon).floor().item())
+        spans = min(spans, axis_size // length)
+        if spans == 0:
+            return x
+        starts = torch.stack([
+            torch.randperm(axis_size - length + 1, device=x.device)[:spans]
+            for _ in range(x.shape[0])
+        ])
+        offsets = torch.arange(length, device=x.device)
+        indices = (starts.unsqueeze(-1) + offsets).flatten(1)
+        mask = torch.zeros((x.shape[0], axis_size), dtype=torch.bool, device=x.device)
+        mask.scatter_(1, indices, True)
+        if axis == 1:
+            return x.masked_fill(mask.unsqueeze(-1), 0.0)
+        return x.masked_fill(mask.unsqueeze(1), 0.0)
+
+    def forward(self, x):
+        if not self.training:
+            return x
+        x = self._mask_axis(x, 1, self.time_prob, self.time_length)
+        return self._mask_axis(x, 2, self.feature_prob, self.feature_length)
+
 def set_seed(seed):
     random.seed(seed)
     np.random.seed(seed)
@@ -78,6 +119,12 @@ class WhisperModelModule(LightningModule):
             block.mlp_dropout = nn.Dropout(cfg.dropout)
         self.encoder_dropout = nn.Dropout(cfg.dropout)
         self.model.ctc_head.final_dropout = nn.Dropout(cfg.dropout)
+        self.model.encoder.spec_augment = Wav2Vec2StyleSpecAugment(
+            time_prob=cfg.mask_time_prob,
+            time_length=cfg.mask_time_length,
+            feature_prob=cfg.mask_feature_prob,
+            feature_length=cfg.mask_feature_length,
+        )
 
         self.register_buffer("val_errors", torch.tensor(0, dtype=torch.long), persistent=False)
         self.register_buffer("val_ref_phones", torch.tensor(0, dtype=torch.long), persistent=False)
@@ -349,6 +396,10 @@ if __name__ == '__main__':
     parser.add_argument("--backbone-ramp-steps", type=int, default=3000)
     parser.add_argument("--eval-steps", type=int, default=1000)
     parser.add_argument("--dropout", type=float, default=0.1)
+    parser.add_argument("--mask-time-prob", type=float, default=0.65)
+    parser.add_argument("--mask-time-length", type=int, default=10)
+    parser.add_argument("--mask-feature-prob", type=float, default=0.25)
+    parser.add_argument("--mask-feature-length", type=int, default=64)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--data-root",
@@ -447,6 +498,10 @@ if __name__ == '__main__':
     cfg.backbone_ramp_steps = args.backbone_ramp_steps
     cfg.eval_steps = args.eval_steps
     cfg.dropout = args.dropout
+    cfg.mask_time_prob = args.mask_time_prob
+    cfg.mask_time_length = args.mask_time_length
+    cfg.mask_feature_prob = args.mask_feature_prob
+    cfg.mask_feature_length = args.mask_feature_length
     cfg.learning_rate = args.learning_rate
     cfg.weight_decay = args.weight_decay
     cfg.adam_epsilon = args.adam_epsilon
