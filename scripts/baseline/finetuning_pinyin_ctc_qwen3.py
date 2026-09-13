@@ -221,6 +221,11 @@ class Qwen3CTCModule(LightningModule):
         self.ctc_head = nn.Linear(self.encoder.config.d_model, args.ctc_vocab)
         nn.init.normal_(self.ctc_head.weight, mean=0.0, std=self.encoder.config.initializer_range)
         nn.init.zeros_(self.ctc_head.bias)
+        self.use_tone_contrastive = getattr(args, "tone_contrastive", False)
+        if self.use_tone_contrastive:
+            self.phone_embedding = nn.Embedding(args.ctc_vocab, self.encoder.config.d_model)
+            nn.init.normal_(self.phone_embedding.weight, mean=0.0,
+                            std=self.encoder.config.initializer_range)
         for name in ("conv2d1", "conv2d2", "conv2d3", "conv_out"):
             for parameter in getattr(self.encoder, name).parameters():
                 parameter.requires_grad = False
@@ -261,15 +266,122 @@ class Qwen3CTCModule(LightningModule):
         lengths = torch.tensor([len(seq) for seq in labels], dtype=torch.long, device=self.device)
         return flat, lengths, labels
 
+    @staticmethod
+    @torch.no_grad()
+    def ctc_occurrence_posteriors(log_probs, targets, blank=0):
+        """Return detached frame posteriors for each target occurrence."""
+        time = log_probs.shape[0]
+        target = torch.as_tensor(targets, dtype=torch.long, device=log_probs.device)
+        states = 2 * len(targets) + 1
+        labels = torch.full((states,), blank, dtype=torch.long, device=log_probs.device)
+        labels[1::2] = target
+        emissions = log_probs[:, labels]
+
+        alpha = log_probs.new_full((time, states), -torch.inf)
+        alpha[0, 0] = emissions[0, 0]
+        if states > 1:
+            alpha[0, 1] = emissions[0, 1]
+        for frame in range(1, time):
+            previous = alpha[frame - 1]
+            candidates = [previous]
+            candidates.append(torch.cat((previous.new_full((1,), -torch.inf), previous[:-1])))
+            skip = torch.cat((previous.new_full((2,), -torch.inf), previous[:-2]))
+            can_skip = torch.zeros(states, dtype=torch.bool, device=log_probs.device)
+            can_skip[2:] = (labels[2:] != blank) & (labels[2:] != labels[:-2])
+            skip = skip.masked_fill(~can_skip, -torch.inf)
+            alpha[frame] = torch.logsumexp(torch.stack((*candidates, skip)), 0) + emissions[frame]
+
+        beta = log_probs.new_full((time, states), -torch.inf)
+        beta[-1, -1] = 0.0
+        if states > 1:
+            beta[-1, -2] = 0.0
+        for frame in range(time - 2, -1, -1):
+            following = beta[frame + 1]
+            stay = following + emissions[frame + 1]
+            advance = torch.cat((following[1:] + emissions[frame + 1, 1:],
+                                 following.new_full((1,), -torch.inf)))
+            skip = torch.cat((following[2:] + emissions[frame + 1, 2:],
+                              following.new_full((2,), -torch.inf)))
+            can_skip = torch.zeros(states, dtype=torch.bool, device=log_probs.device)
+            can_skip[:-2] = (labels[2:] != blank) & (labels[2:] != labels[:-2])
+            skip = skip.masked_fill(~can_skip, -torch.inf)
+            beta[frame] = torch.logsumexp(torch.stack((stay, advance, skip)), 0)
+
+        log_z = torch.logsumexp(alpha[-1, -2:] if states > 1 else alpha[-1, -1:], 0)
+        return (alpha[:, 1::2] + beta[:, 1::2] - log_z).exp().transpose(0, 1).detach()
+
+    def tone_weight(self):
+        start = getattr(self.args, "tone_start_step", 10000)
+        ramp = getattr(self.args, "tone_ramp_steps", 2000)
+        maximum = getattr(self.args, "tone_loss_weight", 0.05)
+        if self.global_step <= start:
+            return 0.0
+        return maximum * min(1.0, (self.global_step - start) / max(1, ramp))
+
+    def tone_contrastive_loss(self, hidden, logits, output_lengths, label_sequences):
+        losses, correct, valid = [], 0, 0
+        temperature = getattr(self.args, "tone_temperature", 0.1)
+        for sequence_hidden, sequence_logits, length, labels in zip(
+                hidden, logits, output_lengths, label_sequences):
+            length = int(length)
+            if not labels or length < len(labels):
+                continue
+            posterior = self.ctc_occurrence_posteriors(
+                sequence_logits[:length].float().log_softmax(-1), labels)
+            for occurrence, phone_id in enumerate(labels):
+                phone = self.phones.id_to_phone[phone_id]
+                if phone[-1:] not in "12345":
+                    continue
+                base = phone[:-1]
+                candidates = [self.phones.phone_to_id[base + tone] for tone in "12345"
+                              if base + tone in self.phones.phone_to_id]
+                if len(candidates) < 2:
+                    continue
+                weights = posterior[occurrence]
+                acoustic = (weights[:, None] * sequence_hidden[:length]).sum(0) / weights.sum().clamp_min(1e-8)
+                acoustic = nn.functional.normalize(acoustic.float(), dim=0)
+                prototypes = nn.functional.normalize(self.phone_embedding.weight[candidates].float(), dim=1)
+                scores = prototypes @ acoustic / temperature
+                target = candidates.index(phone_id)
+                losses.append(nn.functional.cross_entropy(
+                    scores.unsqueeze(0), scores.new_tensor([target], dtype=torch.long)))
+                correct += int(scores.argmax().item() == target)
+                valid += 1
+        if not losses:
+            return self.phone_embedding.weight.sum() * 0.0, 0.0, 0
+        return torch.stack(losses).mean(), correct / valid, valid
+
     def training_step(self, batch, _):
         rows, features, mask = batch
-        logits, output_lengths = self.encode(features, mask)
-        targets, target_lengths, _ = self.targets(rows)
-        loss = self.ctc_loss(
+        hidden, output_lengths = self.encode_hidden(features, mask)
+        logits = self.ctc_head(hidden)
+        targets, target_lengths, label_sequences = self.targets(rows)
+        ctc_loss = self.ctc_loss(
             logits.log_softmax(-1).transpose(0, 1), targets,
             output_lengths, target_lengths,
         )
-        self.log("train/ctc_loss", loss, on_step=True, prog_bar=True, logger=True)
+        tone_weight = self.tone_weight() if self.use_tone_contrastive else 0.0
+        if self.use_tone_contrastive and tone_weight > 0.0:
+            tone_loss, tone_accuracy, tonal_finals = self.tone_contrastive_loss(
+                hidden, logits, output_lengths, label_sequences)
+        elif self.use_tone_contrastive:
+            tone_loss = self.phone_embedding.weight.sum() * 0.0
+            tone_accuracy, tonal_finals = 0.0, 0
+        else:
+            tone_loss = ctc_loss.new_zeros(())
+            tone_accuracy, tonal_finals = 0.0, 0
+        loss = ctc_loss + tone_weight * tone_loss
+        self.log("train/loss", loss, on_step=True, prog_bar=True, logger=True)
+        self.log("train/ctc_loss", ctc_loss, on_step=True, prog_bar=True, logger=True)
+        if self.use_tone_contrastive:
+            self.log("train/tone_loss", tone_loss, on_step=True, prog_bar=True, logger=True,
+                     sync_dist=True)
+            self.log("train/tone_accuracy", tone_accuracy, on_step=True, logger=True,
+                     sync_dist=True)
+            self.log("train/tonal_finals", float(tonal_finals), on_step=True, logger=True,
+                     sync_dist=True)
+            self.log("train/tone_weight", tone_weight, on_step=True, logger=True,
+                     sync_dist=True)
         return loss
 
     @staticmethod
@@ -311,9 +423,12 @@ class Qwen3CTCModule(LightningModule):
 
     def configure_optimizers(self):
         backbone = [p for p in self.encoder.parameters() if p.requires_grad]
+        head_parameters = list(self.ctc_head.parameters())
+        if self.use_tone_contrastive:
+            head_parameters.extend(self.phone_embedding.parameters())
         optimizer = AdamW(
             [{"params": backbone, "name": "backbone"},
-             {"params": self.ctc_head.parameters(), "name": "ctc_head"}],
+             {"params": head_parameters, "name": "heads"}],
             lr=self.args.learning_rate, betas=(0.9, 0.98),
             eps=self.args.adam_epsilon, weight_decay=0.0,
         )
@@ -362,6 +477,11 @@ def parse_args():
     parser.add_argument("--mask-time-length", type=int, default=10)
     parser.add_argument("--mask-feature-prob", type=float, default=.25)
     parser.add_argument("--mask-feature-length", type=int, default=64)
+    parser.add_argument("--tone-contrastive", action="store_true")
+    parser.add_argument("--tone-loss-weight", type=float, default=.05)
+    parser.add_argument("--tone-temperature", type=float, default=.1)
+    parser.add_argument("--tone-start-step", type=int, default=10000)
+    parser.add_argument("--tone-ramp-steps", type=int, default=2000)
     parser.add_argument("--seed", type=int, default=42)
     return parser.parse_args()
 
