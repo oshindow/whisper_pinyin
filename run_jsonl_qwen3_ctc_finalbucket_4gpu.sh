@@ -6,7 +6,7 @@ cd "$SCRIPT_DIR"
 PYTHON_BIN="${PYTHON_BIN:-$SCRIPT_DIR/.venv-qwen3-ctc/bin/python}"
 DATA_ROOT="${DATA_ROOT:-/data2/xintong/mandarin_accent}"
 SPLIT_DIR="${SPLIT_DIR:-data/jsonl_actual_split}"
-EXP_DIR="${EXP_DIR:-/data2/xintong/checkpoints/qwen3_asr_ctc_actual_tonecontrast_crossspeaker}"
+EXP_DIR="${EXP_DIR:-/data2/xintong/checkpoints/qwen3_asr_ctc_actual_tonecontrast_finalbucket_acoustic}"
 export PYTHONUNBUFFERED=1
 export HF_HOME="${HF_HOME:-$SCRIPT_DIR/.cache-qwen3/huggingface}"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
@@ -17,7 +17,6 @@ export TONE_START_STEP="${TONE_START_STEP:-10000}"
 export TONE_RAMP_STEPS="${TONE_RAMP_STEPS:-2000}"
 export TONE_LOSS_WEIGHT="${TONE_LOSS_WEIGHT:-0.05}"
 export TONE_TEMPERATURE="${TONE_TEMPERATURE:-0.1}"
-export TONE_CROSS_ACCENT_WEIGHT="${TONE_CROSS_ACCENT_WEIGHT:-2.0}"
 
 if [[ ! -x "$PYTHON_BIN" ]]; then
   echo "Missing Python: $PYTHON_BIN. Set PYTHON_BIN to your Qwen3-ASR environment." >&2
@@ -61,11 +60,13 @@ CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}" \
   --mask-feature-prob 0.25 \
   --mask-feature-length 64 \
   --tone-contrastive \
-  --tone-cross-accent-weight "$TONE_CROSS_ACCENT_WEIGHT" \
+  --tone-acoustic-only \
+  --final-bucket-sampling \
   --tone-start-step "$TONE_START_STEP" \
   --tone-ramp-steps "$TONE_RAMP_STEPS" \
   --tone-loss-weight "$TONE_LOSS_WEIGHT" \
   --tone-temperature "$TONE_TEMPERATURE" \
   --seed 42 \
   --devices 4 \
-  --strategy ddp
+  --strategy ddp \
+  "$@"

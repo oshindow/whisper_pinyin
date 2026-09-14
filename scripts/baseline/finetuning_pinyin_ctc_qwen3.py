@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import sys
 from pathlib import Path
 
@@ -21,7 +22,9 @@ from pytorch_lightning.loggers import TensorBoardLogger
 from torch.nn.utils.rnn import pad_sequence
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, DistributedSampler
+from scripts.baseline.final_bucket_sampler import FinalBucketSampler
+from scripts.baseline.graceful_checkpoint import GracefulCheckpoint
 
 
 def _qwen_imports():
@@ -222,7 +225,8 @@ class Qwen3CTCModule(LightningModule):
         nn.init.normal_(self.ctc_head.weight, mean=0.0, std=self.encoder.config.initializer_range)
         nn.init.zeros_(self.ctc_head.bias)
         self.use_tone_contrastive = getattr(args, "tone_contrastive", False)
-        if self.use_tone_contrastive:
+        self.tone_acoustic_only = getattr(args, "tone_acoustic_only", False)
+        if self.use_tone_contrastive and not self.tone_acoustic_only:
             self.phone_embedding = nn.Embedding(args.ctc_vocab, self.encoder.config.d_model)
             nn.init.normal_(self.phone_embedding.weight, mean=0.0,
                             std=self.encoder.config.initializer_range)
@@ -318,11 +322,12 @@ class Qwen3CTCModule(LightningModule):
             return 0.0
         return maximum * min(1.0, (self.global_step - start) / max(1, ramp))
 
-    def tone_contrastive_loss(self, hidden, logits, output_lengths, label_sequences):
-        losses, correct, valid = [], 0, 0
-        temperature = getattr(self.args, "tone_temperature", 0.1)
-        for sequence_hidden, sequence_logits, length, labels in zip(
-                hidden, logits, output_lengths, label_sequences):
+    def tone_contrastive_loss(self, hidden, logits, output_lengths, label_sequences, rows):
+        # Alignment is detached; pooled acoustic instances retain encoder gradients.
+        instances, ids, speakers, accents = [], [], [], []
+        temperature = self.args.tone_temperature
+        for sequence_hidden, sequence_logits, length, labels, row in zip(
+                hidden, logits, output_lengths, label_sequences, rows):
             length = int(length)
             if not labels or length < len(labels):
                 continue
@@ -332,24 +337,73 @@ class Qwen3CTCModule(LightningModule):
                 phone = self.phones.id_to_phone[phone_id]
                 if phone[-1:] not in "12345":
                     continue
-                base = phone[:-1]
-                candidates = [self.phones.phone_to_id[base + tone] for tone in "12345"
-                              if base + tone in self.phones.phone_to_id]
-                if len(candidates) < 2:
-                    continue
                 weights = posterior[occurrence]
-                acoustic = (weights[:, None] * sequence_hidden[:length]).sum(0) / weights.sum().clamp_min(1e-8)
-                acoustic = nn.functional.normalize(acoustic.float(), dim=0)
-                prototypes = nn.functional.normalize(self.phone_embedding.weight[candidates].float(), dim=1)
-                scores = prototypes @ acoustic / temperature
-                target = candidates.index(phone_id)
-                losses.append(nn.functional.cross_entropy(
-                    scores.unsqueeze(0), scores.new_tensor([target], dtype=torch.long)))
-                correct += int(scores.argmax().item() == target)
-                valid += 1
+                mass = weights.sum()
+                if not torch.isfinite(weights).all() or mass <= 1e-8:
+                    continue
+                instances.append((weights[:, None] * sequence_hidden[:length]).sum(0) / mass)
+                ids.append(phone_id)
+                # Speaker IDs may be local to each corpus. Missing IDs never qualify.
+                speaker = row.get("speaker_id")
+                speakers.append((str(row.get("source", "")), str(speaker))
+                                if speaker is not None and str(speaker) else None)
+                accent = row.get("accent_id")
+                accents.append(str(accent) if accent is not None and str(accent) else None)
+        if not instances:
+            for key in ("tone_positive_pairs", "tone_cross_accent_pairs", "tone_valid_anchor_fraction"):
+                self.log("train/" + key, 0.0, on_step=True, sync_dist=True)
+            zero = hidden.sum() if self.tone_acoustic_only else self.phone_embedding.weight.sum()
+            return zero * 0.0, 0.0, 0
+        acoustic = nn.functional.normalize(torch.stack(instances).float(), dim=1)
+        losses, correct = [], 0
+        positive_pairs, cross_accent_pairs = 0, 0
+        for i, phone_id in enumerate(ids):
+            base = self.phones.id_to_phone[phone_id][:-1]
+            positives = [j for j, other in enumerate(ids)
+                         if other == phone_id and speakers[i] is not None
+                         and speakers[j] is not None and speakers[j] != speakers[i]]
+            negatives = [j for j, other in enumerate(ids)
+                         if other != phone_id and self.phones.id_to_phone[other][:-1] == base]
+            if self.tone_acoustic_only:
+                if not positives or not negatives:
+                    continue
+                scores = acoustic[positives + negatives] @ acoustic[i] / temperature
+                losses.append(-scores.log_softmax(0)[:len(positives)].mean())
+                correct += int(scores.argmax().item() < len(positives))
+                positive_pairs += len(positives)
+                cross_accent_pairs += sum(accents[i] is not None and accents[j] is not None
+                                          and accents[i] != accents[j] for j in positives)
+                continue
+            candidates = [self.phones.phone_to_id[base + tone] for tone in "12345"
+                          if base + tone in self.phones.phone_to_id]
+            if len(candidates) < 2:
+                continue
+            prototypes = nn.functional.normalize(self.phone_embedding.weight[candidates].float(), dim=1)
+            prototype_scores = prototypes @ acoustic[i] / temperature
+            target = candidates.index(phone_id)
+            selected = positives + negatives
+            instance_scores = acoustic[selected] @ acoustic[i] / temperature
+            scores = torch.cat((prototype_scores, instance_scores))
+            # Weighted SupCon: each positive is pulled towards the anchor individually.
+            # Same-label/same-speaker instances and other finals are excluded entirely.
+            positive_indices = [target] + list(range(len(candidates), len(candidates) + len(positives)))
+            weights = scores.new_tensor([1.0] + [
+                self.args.tone_cross_accent_weight
+                if accents[i] is not None and accents[j] is not None and accents[i] != accents[j]
+                else 1.0 for j in positives])
+            log_probs = scores.log_softmax(0)
+            losses.append(-(log_probs[positive_indices] * weights).sum() / weights.sum())
+            correct += int(prototype_scores.argmax().item() == target)
+            positive_pairs += len(positives)
+            cross_accent_pairs += sum(accents[i] is not None and accents[j] is not None
+                                      and accents[i] != accents[j] for j in positives)
+        self.log("train/tone_positive_pairs", float(positive_pairs), on_step=True, sync_dist=True)
+        self.log("train/tone_cross_accent_pairs", float(cross_accent_pairs), on_step=True, sync_dist=True)
+        self.log("train/tone_valid_anchor_fraction", len(losses) / len(ids), on_step=True, sync_dist=True)
         if not losses:
-            return self.phone_embedding.weight.sum() * 0.0, 0.0, 0
-        return torch.stack(losses).mean(), correct / valid, valid
+            zero = hidden.sum() if self.tone_acoustic_only else self.phone_embedding.weight.sum()
+            return zero * 0.0, 0.0, 0
+        return torch.stack(losses).mean(), correct / len(losses), len(losses)
 
     def training_step(self, batch, _):
         rows, features, mask = batch
@@ -363,9 +417,10 @@ class Qwen3CTCModule(LightningModule):
         tone_weight = self.tone_weight() if self.use_tone_contrastive else 0.0
         if self.use_tone_contrastive and tone_weight > 0.0:
             tone_loss, tone_accuracy, tonal_finals = self.tone_contrastive_loss(
-                hidden, logits, output_lengths, label_sequences)
+                hidden, logits, output_lengths, label_sequences, rows)
         elif self.use_tone_contrastive:
-            tone_loss = self.phone_embedding.weight.sum() * 0.0
+            zero = hidden.sum() if self.tone_acoustic_only else self.phone_embedding.weight.sum()
+            tone_loss = zero * 0.0
             tone_accuracy, tonal_finals = 0.0, 0
         else:
             tone_loss = ctc_loss.new_zeros(())
@@ -424,7 +479,7 @@ class Qwen3CTCModule(LightningModule):
     def configure_optimizers(self):
         backbone = [p for p in self.encoder.parameters() if p.requires_grad]
         head_parameters = list(self.ctc_head.parameters())
-        if self.use_tone_contrastive:
+        if self.use_tone_contrastive and not self.tone_acoustic_only:
             head_parameters.extend(self.phone_embedding.parameters())
         optimizer = AdamW(
             [{"params": backbone, "name": "backbone"},
@@ -460,6 +515,8 @@ def parse_args():
     parser.add_argument("--model-name", default="Qwen/Qwen3-ASR-0.6B-hf")
     parser.add_argument("--ctc-vocab", type=int, default=188)
     parser.add_argument("--exp-dir", default="exp/qwen3_asr_ctc")
+    parser.add_argument("--resume-from-checkpoint", default=None,
+                        help="Restore training progress, optimizer and scheduler from a Lightning checkpoint")
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=3)
     parser.add_argument("--devices", type=int, default=4)
@@ -477,13 +534,19 @@ def parse_args():
     parser.add_argument("--mask-time-length", type=int, default=10)
     parser.add_argument("--mask-feature-prob", type=float, default=.25)
     parser.add_argument("--mask-feature-length", type=int, default=64)
+    parser.add_argument("--final-bucket-sampling", action="store_true")
+    parser.add_argument("--tone-acoustic-only", action="store_true")
     parser.add_argument("--tone-contrastive", action="store_true")
     parser.add_argument("--tone-loss-weight", type=float, default=.05)
     parser.add_argument("--tone-temperature", type=float, default=.1)
     parser.add_argument("--tone-start-step", type=int, default=10000)
     parser.add_argument("--tone-ramp-steps", type=int, default=2000)
+    parser.add_argument("--tone-cross-accent-weight", type=float, default=2.0)
     parser.add_argument("--seed", type=int, default=42)
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.tone_temperature <= 0 or args.tone_cross_accent_weight < 1:
+        parser.error("tone temperature must be > 0 and cross-accent weight must be >= 1")
+    return args
 
 
 def main():
@@ -491,13 +554,24 @@ def main():
     seed_everything(args.seed, workers=True)
     Path(args.exp_dir).mkdir(parents=True, exist_ok=True)
     collator = QwenCollator(args.model_name)
+    train_dataset = QwenCTCDataset(args.train_path, args.data_root)
+    sampler = FinalBucketSampler(
+        train_dataset.rows, args.batch_size,
+        world_size=args.devices if torch.cuda.is_available() else 1, seed=args.seed,
+    ) if args.final_bucket_sampling else None
     train_loader = DataLoader(
-        QwenCTCDataset(args.train_path, args.data_root), batch_size=args.batch_size,
-        shuffle=True, drop_last=True, num_workers=args.workers, collate_fn=collator,
+        train_dataset, batch_size=args.batch_size,
+        sampler=sampler, shuffle=sampler is None, drop_last=True,
+        num_workers=args.workers, collate_fn=collator,
         persistent_workers=args.workers > 0,
     )
+    val_dataset = QwenCTCDataset(args.val_path, args.data_root)
+    val_sampler = DistributedSampler(
+        val_dataset, num_replicas=args.devices,
+        rank=int(os.environ.get("LOCAL_RANK", "0")), shuffle=False,
+    ) if args.final_bucket_sampling and torch.cuda.is_available() else None
     val_loader = DataLoader(
-        QwenCTCDataset(args.val_path, args.data_root), batch_size=args.batch_size,
+        val_dataset, batch_size=args.batch_size, sampler=val_sampler,
         num_workers=args.workers, collate_fn=collator,
         persistent_workers=args.workers > 0,
     )
@@ -514,12 +588,17 @@ def main():
         precision=args.precision, max_steps=args.max_steps, max_epochs=-1,
         accumulate_grad_batches=args.gradient_accumulation_steps,
         gradient_clip_val=1.0, gradient_clip_algorithm="norm",
-        limit_train_batches=args.eval_steps * args.gradient_accumulation_steps,
-        val_check_interval=1.0, check_val_every_n_epoch=1,
-        callbacks=[checkpoint, LearningRateMonitor(logging_interval="step")],
+        # Bucket epochs consume the full sampler; validate every eval_steps updates.
+        use_distributed_sampler=not args.final_bucket_sampling,
+        limit_train_batches=1.0 if args.final_bucket_sampling else args.eval_steps * args.gradient_accumulation_steps,
+        val_check_interval=args.eval_steps * args.gradient_accumulation_steps if args.final_bucket_sampling else 1.0,
+        check_val_every_n_epoch=None if args.final_bucket_sampling else 1,
+        callbacks=[checkpoint, LearningRateMonitor(logging_interval="step"),
+                   GracefulCheckpoint(f"{args.exp_dir}/checkpoints/last.ckpt")],
         logger=TensorBoardLogger(args.exp_dir, name="logs"),
     )
-    trainer.fit(Qwen3CTCModule(args), train_loader, val_loader)
+    trainer.fit(Qwen3CTCModule(args), train_loader, val_loader,
+                ckpt_path=args.resume_from_checkpoint)
 
 
 if __name__ == "__main__":
