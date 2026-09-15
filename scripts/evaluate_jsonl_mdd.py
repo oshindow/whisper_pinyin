@@ -16,6 +16,8 @@ import torchaudio
 from torch.utils.data import DataLoader, Dataset
 
 import whisper
+from preprocessing.f0_features import load_f0_features
+from preprocessing.phone_units import finals_from_lexicon, merge_units, read_lexicon
 from preprocessing.preprocess_pinyin import _resolve_jsonl_audio
 
 
@@ -59,7 +61,9 @@ def align_to_canonical(canonical, predicted):
 
 
 class JsonlAudioDataset(Dataset):
-    def __init__(self, manifest, data_root, rank=0, world_size=1):
+    def __init__(self, manifest, data_root, rank=0, world_size=1, f0_cache_dir=None):
+        self.data_root = data_root
+        self.f0_cache_dir = f0_cache_dir
         self.rows = []
         with open(manifest, encoding="utf-8") as f:
             for index, line in enumerate(f):
@@ -80,12 +84,17 @@ class JsonlAudioDataset(Dataset):
         if sr != 16000:
             audio = torchaudio.functional.resample(audio, sr, 16000)
         mel = whisper.log_mel_spectrogram(whisper.pad_or_trim(audio.flatten()), n_mels=80)
-        return item, mel
+        if self.f0_cache_dir is None:
+            return item, mel, torch.zeros(0)
+        f0 = load_f0_features(item["resolved_wav"], self.data_root, self.f0_cache_dir,
+                              whisper.audio.N_FRAMES // 2)
+        return item, mel, torch.from_numpy(f0)
 
 
 def collate(batch):
-    rows, mels = zip(*batch)
-    return list(rows), torch.stack(mels)
+    rows, mels, f0s = zip(*batch)
+    f0 = torch.stack(f0s) if f0s[0].numel() else None
+    return list(rows), torch.stack(mels), f0
 
 
 def load_tokens(path):
@@ -97,7 +106,7 @@ def load_tokens(path):
     return table
 
 
-def ctc_decode(logits, tokens):
+def ctc_decode(logits, tokens, finals=frozenset()):
     outputs = []
     for sequence in logits.argmax(-1).cpu().tolist():
         collapsed = []
@@ -106,7 +115,9 @@ def ctc_decode(logits, tokens):
             if token_id != previous and token_id not in (0, 1, 2):
                 collapsed.append(tokens[token_id])
             previous = token_id
-        outputs.append(collapsed)
+        # Scoring stays at the phone level whatever the CTC units are, so an
+        # initial/final/tone hypothesis is merged back into tonal finals here.
+        outputs.append(merge_units(collapsed, finals))
     return outputs
 
 
@@ -161,7 +172,17 @@ def main():
     parser.add_argument("--manifests", nargs="+", required=True)
     parser.add_argument("--data-root", default="/data2/xintong/datasets/datasets")
     parser.add_argument("--tokens", default="data/lang_jsonl/tokens.txt")
+    parser.add_argument(
+        "--lexicon", default=None,
+        help="Phone-to-unit lexicon; defaults to lexicon.txt beside --tokens. It tells "
+             "which units a tone may attach to, and an identity lexicon disables merging.",
+    )
     parser.add_argument("--ctc-vocab", type=int, default=188)
+    parser.add_argument(
+        "--f0-cache-dir", default=None,
+        help="Directory of cached WORLD F0 tracks; required for checkpoints trained with the F0 branch.",
+    )
+    parser.add_argument("--f0-dim", type=int, default=256)
     parser.add_argument("--output-dir", default="results/whisper_pinyin_ctc_jsonl")
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--num-workers", type=int, default=4)
@@ -178,28 +199,35 @@ def main():
     # Load on CPU first so checkpoint tensors and the constructed model are not
     # simultaneously resident on a busy GPU. FP16 is sufficient for inference.
     model = whisper.load_model(
-        args.checkpoint, device="cpu", ctc_vocab=args.ctc_vocab, ctc_layers=2
+        args.checkpoint, device="cpu", ctc_vocab=args.ctc_vocab, ctc_layers=2,
+        use_f0=args.f0_cache_dir is not None, f0_dim=args.f0_dim,
     ).eval()
     if device.type == "cuda":
         model = model.half().to(device)
     tokens = load_tokens(args.tokens)
+    lexicon_path = Path(args.lexicon) if args.lexicon else Path(args.tokens).parent / "lexicon.txt"
+    finals = finals_from_lexicon(read_lexicon(lexicon_path)) if lexicon_path.is_file() else frozenset()
     output_dir = Path(args.output_dir)
     if rank == 0:
         output_dir.mkdir(parents=True, exist_ok=True)
 
     all_summaries = {}
     for manifest in args.manifests:
-        dataset = JsonlAudioDataset(manifest, args.data_root, rank, world_size)
+        dataset = JsonlAudioDataset(manifest, args.data_root, rank, world_size,
+                                    f0_cache_dir=args.f0_cache_dir)
         loader = DataLoader(dataset, batch_size=args.batch_size, num_workers=args.num_workers,
                             collate_fn=collate, pin_memory=True)
         local_rows = []
         with torch.inference_mode():
-            for rows, mels in loader:
+            for rows, mels, f0 in loader:
                 with torch.autocast(device_type="cuda", dtype=torch.bfloat16,
                                     enabled=device.type == "cuda"):
                     features, _ = model.encoder(mels.to(device, non_blocking=True))
+                    if model.f0_encoder is not None:
+                        f0 = f0.to(device=features.device, dtype=features.dtype, non_blocking=True)
+                        features = model.f0_fusion(features, model.f0_encoder(f0))
                     _, logits = model.ctc_head(features)
-                for row, prediction in zip(rows, ctc_decode(logits, tokens)):
+                for row, prediction in zip(rows, ctc_decode(logits, tokens, finals)):
                     row["predicted_phones"] = prediction
                     local_rows.append(row)
 

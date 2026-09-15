@@ -107,7 +107,9 @@ def load_model(
     in_memory: bool = False,
     ctc_vocab: int = None,
     ctc_layers: int = None,
-    n_accents: int = 6
+    n_accents: int = 6,
+    use_f0: bool = False,
+    f0_dim: int = 256,
 ) -> Whisper:
     """
     Load a Whisper ASR model
@@ -215,6 +217,9 @@ def load_model(
         ctc_kwargs["ctc_vocab"] = ctc_vocab
     if ctc_layers is not None:
         ctc_kwargs["ctc_layers"] = ctc_layers
+    if use_f0:
+        ctc_kwargs["use_f0"] = True
+        ctc_kwargs["f0_dim"] = f0_dim
     model = Whisper(dims, **ctc_kwargs)
     if name not in _MODELS and "decoder.token_embedding.weight" not in checkpoint["model_state_dict"]:
         for module_name in ("decoder", "stct_head", "accent_classifier", "acc_head",

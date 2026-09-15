@@ -10,6 +10,7 @@ import torch.distributed as dist
 import whisper
  
 from pathlib import Path
+from preprocessing.phone_units import finals_from_lexicon, merge_units
 from preprocessing.preprocess_pinyin import (
     WhisperPinyinDataset,
     WhisperDataCollatorWhithPadding,
@@ -89,7 +90,10 @@ class WhisperModelModule(LightningModule):
         super().__init__()
 
         self.tokenizer = WhisperTokenizer.from_pretrained("openai/whisper-large-v3-turbo", language=lang, task="transcribe")
-        self.model = self.load_pretrained_whisper(model_name, ctc_vocab=cfg.vocab_size, ctc_layers=cfg.ctc_layers)
+        self.model = self.load_pretrained_whisper(
+            model_name, ctc_vocab=cfg.vocab_size, ctc_layers=cfg.ctc_layers,
+            use_f0=getattr(cfg, "use_f0", False), f0_dim=getattr(cfg, "f0_dim", 256),
+        )
 
         self.train_path = cfg.train_path
         self.val_path = cfg.val_path
@@ -108,6 +112,8 @@ class WhisperModelModule(LightningModule):
         
         
         self.lexicon = self.get_lexicon(lexicon_path=cfg.lexicon_path)
+        # Empty unless the lexicon splits tonal finals into a final plus a tone.
+        self.unit_finals = finals_from_lexicon(self.lexicon)
         self.token_table_tight = k2.SymbolTable.from_file(cfg.token_table_path)
         print(cfg.token_table_path)
 
@@ -152,8 +158,19 @@ class WhisperModelModule(LightningModule):
     def forward(self, x):
         return self.model(x)
 
-    def compute_ctc_loss(self, input_ids, pinyins):
-        audio_features,_ = self.model.encoder(input_ids)
+    def encode(self, batch):
+        """Encoder output, fused with the F0 branch when the recipe enables it."""
+        audio_features, _ = self.model.encoder(batch["input_ids"])
+        if self.model.f0_encoder is not None:
+            f0 = batch["f0"].to(device=audio_features.device, dtype=audio_features.dtype)
+            audio_features = self.model.f0_fusion(audio_features, self.model.f0_encoder(f0))
+        return audio_features
+
+    def compute_ctc_loss(self, input_ids, pinyins, f0=None):
+        audio_features, _ = self.model.encoder(input_ids)
+        if self.model.f0_encoder is not None and f0 is not None:
+            f0 = f0.to(device=audio_features.device, dtype=audio_features.dtype)
+            audio_features = self.model.f0_fusion(audio_features, self.model.f0_encoder(f0))
         audio_features = self.encoder_dropout(audio_features)
             
         # ctc head
@@ -203,7 +220,8 @@ class WhisperModelModule(LightningModule):
         )
 
     def training_step(self, batch, batch_id):
-        ctc_loss = self.compute_ctc_loss(batch["input_ids"], batch["pinyins"])
+        ctc_loss = self.compute_ctc_loss(
+            batch["input_ids"], batch["pinyins"], batch.get("f0"))
         canonical_ctc_loss = ctc_loss.new_zeros(())
         if self.cfg.canonical_ctc_weight > 0:
             canonical_ctc_loss = self.compute_ctc_loss(
@@ -218,27 +236,24 @@ class WhisperModelModule(LightningModule):
         return loss
 
     def validation_step(self, batch, batch_id):
-        input_ids = batch["input_ids"]
-        pinyins = batch["pinyins"] 
+        pinyins = batch["pinyins"]
         with torch.no_grad():
-            audio_features,_ = self.model.encoder(input_ids)
-            _, nnet_output = self.model.ctc_head(audio_features)
+            _, nnet_output = self.model.ctc_head(self.encode(batch))
 
         texts = self.ctc_decode(nnet_output, pinyins)
         
         errors = 0
         ref_phones = 0
         for o, l in zip(texts, pinyins):
-            l_list = []
-            for word in l.split(' '):
-                if word not in self.lexicon:
-                    continue
-                
-                for piece in self.lexicon[word]:
-                    l_list.append(piece)
-             
-            errors += self.edit_distance(l_list, o)
-            ref_phones += len(l_list)
+            # PER stays at the phone level whatever the CTC units are: the
+            # hypothesis units are merged back into tonal finals and scored
+            # against the phones the manifest annotates, so checkpoint
+            # selection is comparable across unit inventories.
+            hyp = merge_units(o, self.unit_finals)
+            ref = [word for word in l.split(' ') if word in self.lexicon]
+
+            errors += self.edit_distance(ref, hyp)
+            ref_phones += len(ref)
         self.val_errors += errors
         self.val_ref_phones += ref_phones
 
@@ -287,6 +302,9 @@ class WhisperModelModule(LightningModule):
         backbone = [p for name, p in self.model.encoder.named_parameters()
                     if p.requires_grad and not name.startswith(("conv1.", "conv2."))]
         head = list(self.model.ctc_head.parameters())
+        for module in (self.model.f0_encoder, self.model.f0_fusion):
+            if module is not None:
+                head += list(module.parameters())
         optimizer = AdamW(
             [{"params": backbone, "name": "backbone"},
              {"params": head, "name": "ctc_head"}],
@@ -319,9 +337,10 @@ class WhisperModelModule(LightningModule):
         if stage == 'fit' or stage is None:
             print('total train dataset length:', len(self.train_dataset))
 
-    def load_pretrained_whisper(self, model_name, ctc_vocab, ctc_layers):
+    def load_pretrained_whisper(self, model_name, ctc_vocab, ctc_layers, use_f0=False, f0_dim=256):
         # Load the original Whisper model
-        model = whisper.load_model(model_name, ctc_vocab=ctc_vocab, ctc_layers=ctc_layers)
+        model = whisper.load_model(model_name, ctc_vocab=ctc_vocab, ctc_layers=ctc_layers,
+                                   use_f0=use_f0, f0_dim=f0_dim)
 
         print("Loaded Whisper model and initialized missing weights.")
 
@@ -413,6 +432,11 @@ if __name__ == '__main__':
     parser.add_argument("--mask-time-length", type=int, default=10)
     parser.add_argument("--mask-feature-prob", type=float, default=0.25)
     parser.add_argument("--mask-feature-length", type=int, default=64)
+    parser.add_argument(
+        "--f0-cache-dir", type=str, default=None,
+        help="Directory of cached WORLD F0 tracks; enables the F0 branch when set.",
+    )
+    parser.add_argument("--f0-dim", type=int, default=256)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--data-root",
@@ -529,6 +553,9 @@ if __name__ == '__main__':
     cfg.mask_time_length = args.mask_time_length
     cfg.mask_feature_prob = args.mask_feature_prob
     cfg.mask_feature_length = args.mask_feature_length
+    cfg.f0_cache_dir = args.f0_cache_dir
+    cfg.use_f0 = args.f0_cache_dir is not None
+    cfg.f0_dim = args.f0_dim
     cfg.learning_rate = args.learning_rate
     cfg.weight_decay = args.weight_decay
     cfg.adam_epsilon = args.adam_epsilon

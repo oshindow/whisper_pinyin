@@ -1,0 +1,185 @@
+a1 a 1
+a2 a 2
+a3 a 3
+a4 a 4
+a5 a 5
+aa aa
+ai1 ai 1
+ai2 ai 2
+ai3 ai 3
+ai4 ai 4
+ai5 ai 5
+an1 an 1
+an2 an 2
+an3 an 3
+an4 an 4
+ang1 ang 1
+ang2 ang 2
+ang3 ang 3
+ang4 ang 4
+ao1 ao 1
+ao2 ao 2
+ao3 ao 3
+ao4 ao 4
+b b
+c c
+ch ch
+d d
+e1 e 1
+e2 e 2
+e3 e 3
+e4 e 4
+e5 e 5
+ee ee
+ei1 ei 1
+ei2 ei 2
+ei3 ei 3
+ei4 ei 4
+ei5 ei 5
+en1 en 1
+en2 en 2
+en3 en 3
+en4 en 4
+en5 en 5
+eng1 eng 1
+eng2 eng 2
+eng3 eng 3
+eng4 eng 4
+er2 er 2
+er3 er 3
+er4 er 4
+er5 er 5
+f f
+g g
+h h
+i1 i 1
+i2 i 2
+i3 i 3
+i4 i 4
+i5 i 5
+ia1 ia 1
+ia2 ia 2
+ia3 ia 3
+ia4 ia 4
+ia5 ia 5
+ian1 ian 1
+ian2 ian 2
+ian3 ian 3
+ian4 ian 4
+ian5 ian 5
+iang1 iang 1
+iang2 iang 2
+iang3 iang 3
+iang4 iang 4
+iang5 iang 5
+iao1 iao 1
+iao2 iao 2
+iao3 iao 3
+iao4 iao 4
+ie1 ie 1
+ie2 ie 2
+ie3 ie 3
+ie4 ie 4
+ie5 ie 5
+ii ii
+in1 in 1
+in2 in 2
+in3 in 3
+in4 in 4
+ing1 ing 1
+ing2 ing 2
+ing3 ing 3
+ing4 ing 4
+iong1 iong 1
+iong2 iong 2
+iong3 iong 3
+iong4 iong 4
+iu1 iu 1
+iu2 iu 2
+iu3 iu 3
+iu4 iu 4
+iu5 iu 5
+iz4 iz 4
+j j
+k k
+l l
+m m
+n n
+o1 o 1
+o2 o 2
+o3 o 3
+o4 o 4
+o5 o 5
+ong1 ong 1
+ong2 ong 2
+ong3 ong 3
+ong4 ong 4
+oo oo
+ou1 ou 1
+ou2 ou 2
+ou3 ou 3
+ou4 ou 4
+ou5 ou 5
+p p
+q q
+r r
+s s
+sh sh
+t t
+u1 u 1
+u2 u 2
+u3 u 3
+u4 u 4
+u5 u 5
+ua1 ua 1
+ua2 ua 2
+ua3 ua 3
+ua4 ua 4
+ua5 ua 5
+uai1 uai 1
+uai2 uai 2
+uai3 uai 3
+uai4 uai 4
+uan1 uan 1
+uan2 uan 2
+uan3 uan 3
+uan4 uan 4
+uang1 uang 1
+uang2 uang 2
+uang3 uang 3
+uang4 uang 4
+ueng1 ueng 1
+ui1 ui 1
+ui2 ui 2
+ui3 ui 3
+ui4 ui 4
+un1 un 1
+un2 un 2
+un3 un 3
+un4 un 4
+uo1 uo 1
+uo2 uo 2
+uo3 uo 3
+uo4 uo 4
+uo5 uo 5
+uu uu
+v1 v 1
+v2 v 2
+v3 v 3
+v4 v 4
+van1 van 1
+van2 van 2
+van3 van 3
+van4 van 4
+ve1 ve 1
+ve2 ve 2
+ve3 ve 3
+ve4 ve 4
+vn1 vn 1
+vn2 vn 2
+vn3 vn 3
+vn4 vn 4
+vv vv
+x x
+z z
+zh zh
