@@ -30,20 +30,20 @@ from scripts.baseline.finetuning_pinyin_ctc_qwen3 import (
 TONES = "12345"
 
 
-def choose_final(rows, phone_field):
+def choose_finals(rows, phone_field, count=5):
     counts = Counter(
         phone for row in rows for phone in row[phone_field]
         if phone and phone[-1:] in TONES
     )
     grouped = defaultdict(dict)
-    for phone, count in counts.items():
-        grouped[phone[:-1]][phone[-1]] = count
-    eligible = [(sum(value.values()), base, value) for base, value in grouped.items()
-                if all(tone in value for tone in TONES)]
+    for phone, occurrence_count in counts.items():
+        grouped[phone[:-1]][phone[-1]] = occurrence_count
+    eligible = sorted(
+        [(sum(value.values()), base, value) for base, value in grouped.items()
+         if all(tone in value for tone in TONES)], reverse=True)
     if not eligible:
         raise ValueError("No final has examples for all five tones")
-    _, base, tone_counts = max(eligible)
-    return base, tone_counts
+    return [(base, tone_counts) for _, base, tone_counts in eligible[:count]]
 
 
 def ctc_viterbi(log_probs, targets, blank=0):
@@ -93,7 +93,11 @@ def main():
     parser.add_argument("--phone-field", default="actual_phones",
                         help="Phone sequence used for CTC alignment (e.g. actual_phones or canonical_phones)")
     parser.add_argument("--output-dir", default="results/qwen3_tone_tsne")
-    parser.add_argument("--final", default=None, help="Final without tone; default: most frequent with tones 1--5")
+    parser.add_argument("--final", default=None,
+                        help="Legacy single final override")
+    parser.add_argument("--finals", nargs="+", default=None,
+                        help="Explicit finals without tone; default: five most frequent finals with tones 1--5")
+    parser.add_argument("--num-finals", type=int, default=5)
     parser.add_argument("--samples-per-tone", type=int, default=100)
     parser.add_argument("--candidate-multiplier", type=int, default=2)
     parser.add_argument("--batch-size", type=int, default=16)
@@ -110,28 +114,51 @@ def main():
             if marker not in source:
                 raise ValueError(f"Cannot derive relative audio path from l2_wav: {source}")
             row[args.audio_field] = str(Path(args.audio_root) / source.split(marker, 1)[1])
-    selected_final, corpus_counts = choose_final(dataset.rows, args.phone_field)
-    if args.final:
-        selected_final = args.final
-        corpus_counts = Counter(
-            phone[-1] for row in dataset.rows for phone in row[args.phone_field]
-            if phone in {selected_final + tone for tone in TONES}
-        )
-    target_phones = {selected_final + tone for tone in TONES}
-    print("Selected final:", selected_final, "corpus counts:", dict(corpus_counts), flush=True)
+    if args.finals and args.final:
+        parser.error("use either --finals or --final, not both")
+    if args.finals or args.final:
+        selected_finals = args.finals or [args.final]
+        selected = []
+        for base in selected_finals:
+            counts = Counter(
+                phone[-1] for row in dataset.rows for phone in row[args.phone_field]
+                if phone in {base + tone for tone in TONES})
+            if not all(counts[tone] for tone in TONES):
+                raise ValueError(f"Final {base!r} does not have all five tones: {dict(counts)}")
+            selected.append((base, counts))
+    else:
+        selected = choose_finals(dataset.rows, args.phone_field, args.num_finals)
+    selected_finals = [base for base, _ in selected]
+    corpus_counts = {base: dict(counts) for base, counts in selected}
+    target_phones = {base + tone for base in selected_finals for tone in TONES}
+    available_counts = {
+        base + tone: corpus_counts[base][tone]
+        for base in selected_finals for tone in TONES
+    }
+    desired_counts = {
+        # Retain the same candidate reserve used by the single-final script so
+        # occasional failed CTC alignments do not make rare tones impossible.
+        phone: min(args.samples_per_tone,
+                   max(1, count // max(1, args.candidate_multiplier)))
+        for phone, count in available_counts.items()
+    }
+    print("Selected finals:", selected_finals, "corpus counts:", corpus_counts, flush=True)
 
     indices = list(range(len(dataset)))
     rng.shuffle(indices)
-    required_candidates = args.samples_per_tone * args.candidate_multiplier
+    required_candidates = {
+        phone: min(available_counts[phone], desired_counts[phone] * args.candidate_multiplier)
+        for phone in target_phones
+    }
     candidate_counts = Counter()
     selected_indices = []
     for index in indices:
         present = Counter(p for p in dataset.rows[index][args.phone_field] if p in target_phones)
-        if any(candidate_counts[p[-1]] < required_candidates for p in present):
+        if any(candidate_counts[p] < required_candidates[p] for p in present):
             selected_indices.append(index)
             for phone, count in present.items():
-                candidate_counts[phone[-1]] += count
-        if all(candidate_counts[tone] >= required_candidates for tone in TONES):
+                candidate_counts[phone] += count
+        if all(candidate_counts[phone] >= required_candidates[phone] for phone in target_phones):
             break
     print("Candidate occurrences:", dict(candidate_counts), flush=True)
     missing_audio = [dataset.rows[index][args.audio_field] for index in selected_indices
@@ -156,8 +183,8 @@ def main():
         pin_memory=device.type == "cuda",
     )
 
-    vectors = {tone: [] for tone in TONES}
-    metadata = {tone: [] for tone in TONES}
+    vectors = {phone: [] for phone in sorted(target_phones)}
+    metadata = {phone: [] for phone in sorted(target_phones)}
     with torch.inference_mode():
         for rows, features, mask in loader:
             with torch.autocast("cuda", dtype=torch.float16, enabled=device.type == "cuda"):
@@ -177,26 +204,27 @@ def main():
                     if state % 2:
                         state_to_frames[state // 2].append(frame)
                 for target_index, phone in enumerate(phones):
-                    if phone not in target_phones or len(vectors[phone[-1]]) >= args.samples_per_tone:
+                    if phone not in target_phones or len(vectors[phone]) >= desired_counts[phone]:
                         continue
                     frames = state_to_frames[target_index]
                     if not frames:
                         continue
                     vector = sequence_hidden[frames].float().mean(0).cpu().numpy()
-                    vectors[phone[-1]].append(vector)
-                    metadata[phone[-1]].append(
+                    vectors[phone].append(vector)
+                    metadata[phone].append(
                         {"id": row.get("id"), "source": row.get("source"),
                          "audio": row.get(args.audio_field), "phone": phone,
                          "frames": len(frames)}
                     )
-            if all(len(vectors[tone]) >= args.samples_per_tone for tone in TONES):
+            if all(len(vectors[phone]) >= desired_counts[phone] for phone in target_phones):
                 break
 
-    counts = {tone: len(vectors[tone]) for tone in TONES}
-    if any(count < args.samples_per_tone for count in counts.values()):
-        raise RuntimeError(f"Could not collect balanced samples: {counts}")
-    x = np.concatenate([np.stack(vectors[tone]) for tone in TONES])
-    labels = np.concatenate([[tone] * args.samples_per_tone for tone in TONES])
+    ordered_phones = [base + tone for base in selected_finals for tone in TONES]
+    counts = {phone: len(vectors[phone]) for phone in ordered_phones}
+    if any(count < desired_counts[phone] for phone, count in counts.items()):
+        raise RuntimeError(f"Could not collect requested samples: actual={counts}, desired={desired_counts}")
+    x = np.concatenate([np.stack(vectors[phone]) for phone in ordered_phones])
+    labels = np.concatenate([[phone] * len(vectors[phone]) for phone in ordered_phones])
     # PCA denoising before t-SNE makes the result reproducible and faster.
     pca_dim = min(50, x.shape[0] - 1, x.shape[1])
     x_pca = PCA(n_components=pca_dim, random_state=args.seed).fit_transform(x)
@@ -208,31 +236,49 @@ def main():
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    np.savez(output_dir / "tone_latents_tsne.npz", latent=x, tsne=embedding, tone=labels)
+    np.savez(output_dir / "tone_latents_tsne.npz", latent=x, tsne=embedding,
+             phone=labels,
+             final=np.asarray([phone[:-1] for phone in labels]),
+             tone=np.asarray([phone[-1] for phone in labels]))
     (output_dir / "metadata.jsonl").write_text(
         "".join(json.dumps(row, ensure_ascii=False) + "\n"
-                for tone in TONES for row in metadata[tone]), encoding="utf-8"
+                for phone in ordered_phones for row in metadata[phone]), encoding="utf-8"
     )
     summary = {
         "checkpoint": args.checkpoint, "manifest": args.manifest,
         "audio_field": args.audio_field, "audio_root": args.audio_root,
         "phone_field": args.phone_field,
-        "selected_final": selected_final, "corpus_counts": dict(corpus_counts),
-        "samples_per_tone": args.samples_per_tone, "total_samples": len(labels),
+        "selected_finals": selected_finals, "corpus_counts": corpus_counts,
+        "samples_per_tone_cap": args.samples_per_tone,
+        "desired_counts": desired_counts, "actual_counts": counts,
+        "total_samples": len(labels),
         "pca_silhouette": silhouette, "seed": args.seed,
     }
     (output_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
 
-    colors = ["#0072B2", "#E69F00", "#009E73", "#D55E00", "#CC79A7"]
-    plt.figure(figsize=(8, 6.5))
-    for tone, color in zip(TONES, colors):
-        keep = labels == tone
-        plt.scatter(embedding[keep, 0], embedding[keep, 1], s=22, alpha=.72,
-                    color=color, label=f"{selected_final}{tone} (n={keep.sum()})")
+    # Final controls hue; tone 1--5 progresses from light to dark.
+    final_palettes = {
+        "i": ("#FFB3A7", "#FF7F6E", "#F04444", "#B91C1C", "#6B0F1A"),
+        "e": ("#B7E4C7", "#74C69D", "#40916C", "#2D6A4F", "#123D2A"),
+        "u": ("#D9D9D9", "#B0B0B0", "#858585", "#5F5F5F", "#383838"),
+        "ian": ("#B9D8FF", "#76AEF2", "#3B82F6", "#1D4ED8", "#173A78"),
+        "ai": ("#E8C6F0", "#CC8DDA", "#A855B8", "#7E2F8E", "#4B1858"),
+    }
+    tone_markers = {"1": "o", "2": "^", "3": "s", "4": "D", "5": "X"}
+
+    plt.figure(figsize=(12, 9))
+    for base in selected_finals:
+        palette = final_palettes[base]
+        for tone, color in zip(TONES, palette):
+            phone = base + tone
+            keep = labels == phone
+            plt.scatter(embedding[keep, 0], embedding[keep, 1], s=18, alpha=.68,
+                        color=color, marker=tone_markers[tone],
+                        label=f"{phone} (n={keep.sum()})")
     plt.xlabel("t-SNE dimension 1")
     plt.ylabel("t-SNE dimension 2")
-    plt.title(f"Qwen3-ASR CTC-aligned latent features: {selected_final}1--{selected_final}5")
-    plt.legend(frameon=False, ncol=2)
+    plt.title("Qwen3-ASR CTC-aligned latent features: " + ", ".join(selected_finals))
+    plt.legend(frameon=False, ncol=len(selected_finals), fontsize=8)
     plt.tight_layout()
     plt.savefig(output_dir / "tone_latents_tsne.png", dpi=300)
     plt.savefig(output_dir / "tone_latents_tsne.pdf")

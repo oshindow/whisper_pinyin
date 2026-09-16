@@ -15,6 +15,7 @@ sys.path.insert(0, str(ROOT))
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+import torch.nn.functional as F
 import torchaudio
 from pytorch_lightning import LightningModule, Trainer, seed_everything
 from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
@@ -25,6 +26,8 @@ from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
 from scripts.baseline.final_bucket_sampler import FinalBucketSampler
 from scripts.baseline.graceful_checkpoint import GracefulCheckpoint
+from scripts.baseline.mfa_pooling import attach_mfa_intervals, interval_frame_indices
+from preprocessing.f0_features import f0_cache_path, f0_to_features
 
 
 def _qwen_imports():
@@ -98,8 +101,11 @@ class PhoneTable:
 
 
 class QwenCTCDataset(Dataset):
-    def __init__(self, manifest: str, data_root: str, audio_field: str = "l2_wav"):
+    def __init__(self, manifest: str, data_root: str, audio_field: str = "l2_wav",
+                 f0_cache_dir: str | None = None):
         self.audio_field = audio_field
+        self.data_root = data_root
+        self.f0_cache_dir = f0_cache_dir
         self.rows = []
         for line in Path(manifest).read_text(encoding="utf-8").splitlines():
             if line.strip():
@@ -135,17 +141,28 @@ class QwenCTCDataset(Dataset):
         waveform = waveform.mean(0)
         if sample_rate != 16000:
             waveform = torchaudio.functional.resample(waveform, sample_rate, 16000)
-        return row, waveform.numpy()
+        if self.f0_cache_dir is None:
+            return row, waveform.numpy()
+        import numpy as np
+        path = f0_cache_path(row[self.audio_field], self.data_root, self.f0_cache_dir)
+        if not path.is_file():
+            raise FileNotFoundError(f"missing F0 cache for {row[self.audio_field]} at {path}")
+        raw_f0 = np.load(path)
+        return row, waveform.numpy(), f0_to_features(raw_f0, len(raw_f0))
 
 
 class QwenCollator:
-    def __init__(self, model_id: str):
+    def __init__(self, model_id: str, use_f0: bool = False):
         _, AutoFeatureExtractor, _ = _qwen_imports()
         self.extractor = AutoFeatureExtractor.from_pretrained(model_id)
         self.chunk_size = self.extractor.n_window * 2
+        self.use_f0 = use_f0
 
     def __call__(self, examples):
-        rows, waveforms = zip(*examples)
+        if self.use_f0:
+            rows, waveforms, f0s = zip(*examples)
+        else:
+            rows, waveforms = zip(*examples)
         encoded = self.extractor(
             list(waveforms), sampling_rate=16000, padding=True,
             return_attention_mask=True, return_tensors="pt",
@@ -160,7 +177,64 @@ class QwenCollator:
         if padded != features.shape[-1]:
             features = nn.functional.pad(features, (0, padded - features.shape[-1]))
             mask = nn.functional.pad(mask, (0, padded - mask.shape[-1]))
-        return list(rows), features, mask.long()
+        prepared_rows = []
+        for row, mel_length in zip(rows, mask.sum(-1).tolist()):
+            if row.get("mfa_intervals") is not None:
+                row = dict(row)
+                row["mfa_frame_indices"] = interval_frame_indices(
+                    row["mfa_intervals"], int(mel_length), self.chunk_size,
+                    self.extractor.hop_length / self.extractor.sampling_rate)
+            prepared_rows.append(row)
+        batch = (prepared_rows, features, mask.long())
+        if self.use_f0:
+            batch += ([torch.from_numpy(f0) for f0 in f0s],)
+        return batch
+
+
+class F0Encoder(nn.Module):
+    """The same three-layer convolutional F0 encoder used by Whisper."""
+    def __init__(self, in_dim=3, hidden_size=128, out_dim=256):
+        super().__init__()
+        widths = (in_dim, hidden_size, out_dim, out_dim)
+        self.convs = nn.ModuleList([
+            nn.Conv1d(widths[i], widths[i + 1], kernel_size=5, padding=2)
+            for i in range(3)
+        ])
+        self.norms = nn.ModuleList([nn.LayerNorm(widths[i + 1]) for i in range(3)])
+
+    def forward(self, f0):
+        x = f0
+        for conv, norm in zip(self.convs, self.norms):
+            x = F.gelu(conv(x)).transpose(1, 2).contiguous()
+            x = norm(x).transpose(1, 2)
+        return x.transpose(1, 2)
+
+
+class F0Fusion(nn.Module):
+    """Identity-initialized audio/F0 fusion, matching the Whisper implementation."""
+    def __init__(self, audio_dim, f0_dim):
+        super().__init__()
+        self.proj = nn.Linear(audio_dim + f0_dim, audio_dim)
+        self.norm = nn.LayerNorm(audio_dim)
+        with torch.no_grad():
+            self.proj.weight.zero_()
+            self.proj.weight[:, :audio_dim].copy_(torch.eye(audio_dim))
+            self.proj.bias.zero_()
+
+    def forward(self, audio_features, f0_features):
+        return self.norm(self.proj(torch.cat([audio_features, f0_features], dim=-1)))
+
+
+class F0PredictionHead(nn.Module):
+    """The original two-layer CTCHead shape, specialized to one F0 value."""
+    def __init__(self, hidden_size):
+        super().__init__()
+        self.layers = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size), nn.GELU(), nn.LayerNorm(hidden_size))
+        self.proj = nn.Linear(hidden_size, 1)
+
+    def forward(self, hidden):
+        return self.proj(self.layers(hidden)).squeeze(-1)
 
 
 class PackedSpecAugment:
@@ -224,6 +298,15 @@ class Qwen3CTCModule(LightningModule):
         self.ctc_head = nn.Linear(self.encoder.config.d_model, args.ctc_vocab)
         nn.init.normal_(self.ctc_head.weight, mean=0.0, std=self.encoder.config.initializer_range)
         nn.init.zeros_(self.ctc_head.bias)
+        self.use_f0 = getattr(args, "f0_cache_dir", None) is not None
+        self.f0_loss_weight = getattr(args, "f0_loss_weight", 0.0)
+        if self.use_f0:
+            f0_dim = getattr(args, "f0_dim", 256)
+            self.f0_encoder = F0Encoder(out_dim=f0_dim)
+            self.f0_fusion = F0Fusion(self.encoder.config.d_model, f0_dim)
+            self.f0_head = F0PredictionHead(self.encoder.config.d_model)
+        else:
+            self.f0_encoder = self.f0_fusion = self.f0_head = None
         self.use_tone_contrastive = getattr(args, "tone_contrastive", False)
         self.tone_acoustic_only = getattr(args, "tone_acoustic_only", False)
         if self.use_tone_contrastive and not self.tone_acoustic_only:
@@ -241,6 +324,7 @@ class Qwen3CTCModule(LightningModule):
         self.ctc_loss = nn.CTCLoss(blank=0, reduction="mean", zero_infinity=True)
         self.register_buffer("val_errors", torch.tensor(0, dtype=torch.long), persistent=False)
         self.register_buffer("val_phones", torch.tensor(0, dtype=torch.long), persistent=False)
+        self.register_buffer("val_f0_stats", torch.zeros(3, dtype=torch.float64), persistent=False)
 
     def encode_hidden(self, features, feature_mask):
         lengths = feature_mask.sum(-1).long()
@@ -257,6 +341,41 @@ class Qwen3CTCModule(LightningModule):
     def encode(self, features, feature_mask):
         hidden, output_lengths = self.encode_hidden(features, feature_mask)
         return self.ctc_head(hidden), output_lengths
+
+    @staticmethod
+    def align_f0(f0_sequences, output_lengths, max_length, device):
+        """Resample cached 20 ms F0 tracks to each Qwen encoder sequence."""
+        aligned = []
+        for f0, length in zip(f0_sequences, output_lengths.tolist()):
+            f0 = f0.to(device=device, dtype=torch.float32)
+            contour = F.interpolate(f0[:2].unsqueeze(0), size=length,
+                                    mode="linear", align_corners=False).squeeze(0)
+            voiced = F.interpolate(f0[2:].unsqueeze(0), size=length,
+                                   mode="nearest").squeeze(0)
+            item = torch.cat((contour, voiced), 0)
+            aligned.append(F.pad(item, (0, max_length - length)))
+        return torch.stack(aligned)
+
+    @staticmethod
+    def f0_loss_stats(prediction, f0_features):
+        target = f0_features[:, 0].detach().float()
+        mask = f0_features[:, 2] > 0.5
+        predicted = prediction.float()[mask]
+        target = target[mask]
+        if predicted.numel() == 0:
+            zero = prediction.float().sum() * 0.0
+            return zero, zero.detach(), mask.sum()
+        return (F.smooth_l1_loss(predicted, target, reduction="sum"),
+                (predicted - target).abs().sum(), mask.sum())
+
+    def encode_with_f0(self, features, feature_mask, f0_sequences):
+        acoustic, output_lengths = self.encode_hidden(features, feature_mask)
+        if not self.use_f0:
+            return acoustic, output_lengths, None, None
+        f0 = self.align_f0(f0_sequences, output_lengths, acoustic.shape[1], acoustic.device)
+        prediction = self.f0_head(acoustic)
+        fused = self.f0_fusion(acoustic, self.f0_encoder(f0.to(acoustic.dtype)))
+        return fused, output_lengths, prediction, f0
 
     def targets(self, rows):
         labels = []
@@ -331,17 +450,29 @@ class Qwen3CTCModule(LightningModule):
             length = int(length)
             if not labels or length < len(labels):
                 continue
-            posterior = self.ctc_occurrence_posteriors(
-                sequence_logits[:length].float().log_softmax(-1), labels)
+            mfa_frames = row.get("mfa_frame_indices")
+            if getattr(self.args, "mfa_alignment_dir", None):
+                if mfa_frames is None:
+                    continue
+                posterior = None
+            else:
+                posterior = self.ctc_occurrence_posteriors(
+                    sequence_logits[:length].float().log_softmax(-1), labels)
             for occurrence, phone_id in enumerate(labels):
                 phone = self.phones.id_to_phone[phone_id]
                 if phone[-1:] not in "12345":
                     continue
-                weights = posterior[occurrence]
-                mass = weights.sum()
-                if not torch.isfinite(weights).all() or mass <= 1e-8:
-                    continue
-                instances.append((weights[:, None] * sequence_hidden[:length]).sum(0) / mass)
+                if posterior is None:
+                    frames = mfa_frames[occurrence]
+                    if not frames:
+                        continue
+                    instances.append(sequence_hidden[frames].float().mean(0))
+                else:
+                    weights = posterior[occurrence]
+                    mass = weights.sum()
+                    if not torch.isfinite(weights).all() or mass <= 1e-8:
+                        continue
+                    instances.append((weights[:, None] * sequence_hidden[:length]).sum(0) / mass)
                 ids.append(phone_id)
                 # Speaker IDs may be local to each corpus. Missing IDs never qualify.
                 speaker = row.get("speaker_id")
@@ -406,8 +537,9 @@ class Qwen3CTCModule(LightningModule):
         return torch.stack(losses).mean(), correct / len(losses), len(losses)
 
     def training_step(self, batch, _):
-        rows, features, mask = batch
-        hidden, output_lengths = self.encode_hidden(features, mask)
+        rows, features, mask, *optional = batch
+        hidden, output_lengths, f0_prediction, f0 = self.encode_with_f0(
+            features, mask, optional[0] if optional else None)
         logits = self.ctc_head(hidden)
         targets, target_lengths, label_sequences = self.targets(rows)
         ctc_loss = self.ctc_loss(
@@ -425,9 +557,16 @@ class Qwen3CTCModule(LightningModule):
         else:
             tone_loss = ctc_loss.new_zeros(())
             tone_accuracy, tonal_finals = 0.0, 0
-        loss = ctc_loss + tone_weight * tone_loss
+        f0_loss = ctc_loss.new_zeros(())
+        if f0_prediction is not None:
+            f0_error, _, f0_count = self.f0_loss_stats(f0_prediction, f0)
+            f0_loss = f0_error / f0_count.clamp_min(1)
+        loss = ctc_loss + tone_weight * tone_loss + self.f0_loss_weight * f0_loss
         self.log("train/loss", loss, on_step=True, prog_bar=True, logger=True)
         self.log("train/ctc_loss", ctc_loss, on_step=True, prog_bar=True, logger=True)
+        if self.use_f0:
+            self.log("train/f0_loss", f0_loss, on_step=True, prog_bar=True,
+                     logger=True, sync_dist=True)
         if self.use_tone_contrastive:
             self.log("train/tone_loss", tone_loss, on_step=True, prog_bar=True, logger=True,
                      sync_dist=True)
@@ -451,8 +590,12 @@ class Qwen3CTCModule(LightningModule):
         return previous[-1]
 
     def validation_step(self, batch, _):
-        rows, features, mask = batch
-        logits, output_lengths = self.encode(features, mask)
+        rows, features, mask, *optional = batch
+        hidden, output_lengths, prediction, f0 = self.encode_with_f0(
+            features, mask, optional[0] if optional else None)
+        logits = self.ctc_head(hidden)
+        if prediction is not None:
+            self.val_f0_stats += torch.stack(self.f0_loss_stats(prediction, f0)).detach().double()
         _, _, references = self.targets(rows)
         predictions = logits.argmax(-1)
         for sequence, length, reference in zip(predictions, output_lengths, references):
@@ -466,6 +609,7 @@ class Qwen3CTCModule(LightningModule):
             self.val_phones += len(reference)
 
     def on_validation_epoch_start(self):
+        self.val_f0_stats.zero_()
         self.val_errors.zero_()
         self.val_phones.zero_()
 
@@ -475,10 +619,20 @@ class Qwen3CTCModule(LightningModule):
             dist.all_reduce(totals, op=dist.ReduceOp.SUM)
         per = totals[0].float() / totals[1].clamp_min(1)
         self.log("val/per", per, prog_bar=True, logger=True, sync_dist=False)
+        if self.use_f0:
+            stats = self.val_f0_stats.clone()
+            if dist.is_available() and dist.is_initialized():
+                dist.all_reduce(stats, op=dist.ReduceOp.SUM)
+            self.log("val/f0_loss", stats[0] / stats[2].clamp_min(1), sync_dist=False)
+            self.log("val/f0_mae", stats[1] / stats[2].clamp_min(1), sync_dist=False)
+            self.log("val/f0_voiced_frames", stats[2], sync_dist=False)
 
     def configure_optimizers(self):
         backbone = [p for p in self.encoder.parameters() if p.requires_grad]
         head_parameters = list(self.ctc_head.parameters())
+        for module in (self.f0_encoder, self.f0_fusion, self.f0_head):
+            if module is not None:
+                head_parameters.extend(module.parameters())
         if self.use_tone_contrastive and not self.tone_acoustic_only:
             head_parameters.extend(self.phone_embedding.parameters())
         optimizer = AdamW(
@@ -534,7 +688,12 @@ def parse_args():
     parser.add_argument("--mask-time-length", type=int, default=10)
     parser.add_argument("--mask-feature-prob", type=float, default=.25)
     parser.add_argument("--mask-feature-length", type=int, default=64)
+    parser.add_argument("--f0-cache-dir", default=None)
+    parser.add_argument("--f0-dim", type=int, default=256)
+    parser.add_argument("--f0-loss-weight", type=float, default=0.0)
     parser.add_argument("--final-bucket-sampling", action="store_true")
+    parser.add_argument("--mfa-alignment-dir", default=None,
+                        help="MFA TextGrid root for contrastive interval pooling; default: CTC posterior pooling")
     parser.add_argument("--tone-acoustic-only", action="store_true")
     parser.add_argument("--tone-contrastive", action="store_true")
     parser.add_argument("--tone-loss-weight", type=float, default=.05)
@@ -546,6 +705,10 @@ def parse_args():
     args = parser.parse_args()
     if args.tone_temperature <= 0 or args.tone_cross_accent_weight < 1:
         parser.error("tone temperature must be > 0 and cross-accent weight must be >= 1")
+    if args.f0_loss_weight < 0:
+        parser.error("F0 loss weight must be non-negative")
+    if args.f0_loss_weight > 0 and args.f0_cache_dir is None:
+        parser.error("positive F0 loss weight requires --f0-cache-dir")
     return args
 
 
@@ -553,8 +716,20 @@ def main():
     args = parse_args()
     seed_everything(args.seed, workers=True)
     Path(args.exp_dir).mkdir(parents=True, exist_ok=True)
-    collator = QwenCollator(args.model_name)
-    train_dataset = QwenCTCDataset(args.train_path, args.data_root)
+    collator = QwenCollator(args.model_name, use_f0=args.f0_cache_dir is not None)
+    train_dataset = QwenCTCDataset(args.train_path, args.data_root,
+                                   f0_cache_dir=args.f0_cache_dir)
+    if args.mfa_alignment_dir:
+        coverage = attach_mfa_intervals(train_dataset.rows, args.mfa_alignment_dir)
+        train_dataset.rows = [row for row in train_dataset.rows
+                              if row["mfa_intervals"] is not None]
+        coverage["retained"] = len(train_dataset.rows)
+        coverage["dropped"] = coverage["total"] - len(train_dataset.rows)
+        print(f"MFA training samples: retained={coverage['retained']}, dropped={coverage['dropped']}",
+              flush=True)
+        if int(os.environ.get("RANK", os.environ.get("LOCAL_RANK", "0"))) == 0:
+            (Path(args.exp_dir) / "mfa_coverage.json").write_text(
+                json.dumps(coverage, indent=2) + "\n", encoding="utf-8")
     sampler = FinalBucketSampler(
         train_dataset.rows, args.batch_size,
         world_size=args.devices if torch.cuda.is_available() else 1, seed=args.seed,
@@ -565,7 +740,8 @@ def main():
         num_workers=args.workers, collate_fn=collator,
         persistent_workers=args.workers > 0,
     )
-    val_dataset = QwenCTCDataset(args.val_path, args.data_root)
+    val_dataset = QwenCTCDataset(args.val_path, args.data_root,
+                                 f0_cache_dir=args.f0_cache_dir)
     val_sampler = DistributedSampler(
         val_dataset, num_replicas=args.devices,
         rank=int(os.environ.get("LOCAL_RANK", "0")), shuffle=False,

@@ -12,4 +12,5 @@ fi
 
 echo "Resuming training from: $RESUME_CHECKPOINT"
 exec bash "$SCRIPT_DIR/run_jsonl_qwen3_ctc_finalbucket_4gpu.sh" \
+  --mfa-alignment-dir "${MFA_ALIGNMENT_DIR:-}" \
   --resume-from-checkpoint "$RESUME_CHECKPOINT" "$@"

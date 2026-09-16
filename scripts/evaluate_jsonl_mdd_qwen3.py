@@ -121,26 +121,33 @@ def main():
     model.eval()
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     model.to(device)
-    collator = QwenCollator(model_args.model_name)
+    use_f0 = getattr(model_args, "f0_cache_dir", None) is not None
+    collator = QwenCollator(model_args.model_name, use_f0=use_f0)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     summaries = {}
     special_ids = {0, 1, 2}
     for manifest in args.manifests:
-        dataset = QwenCTCDataset(manifest, args.data_root)
+        dataset = QwenCTCDataset(
+            manifest, args.data_root,
+            f0_cache_dir=getattr(model_args, "f0_cache_dir", None),
+        )
         loader = DataLoader(
             dataset, batch_size=args.batch_size, num_workers=args.num_workers,
             collate_fn=collator, pin_memory=device.type == "cuda",
         )
         predictions = []
         with torch.inference_mode():
-            for rows, features, mask in loader:
+            for batch in loader:
+                rows, features, mask, *optional = batch
                 with torch.autocast("cuda", dtype=torch.float16, enabled=device.type == "cuda"):
-                    logits, lengths = model.encode(
+                    hidden, lengths, _, _ = model.encode_with_f0(
                         features.to(device, non_blocking=True),
                         mask.to(device, non_blocking=True),
+                        optional[0] if optional else None,
                     )
+                    logits = model.ctc_head(hidden)
                 for row, sequence, length in zip(rows, logits.argmax(-1).cpu(), lengths.cpu()):
                     output, previous = [], -1
                     for token in sequence[:int(length)]:

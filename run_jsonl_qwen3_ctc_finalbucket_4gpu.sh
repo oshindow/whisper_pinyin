@@ -6,7 +6,8 @@ cd "$SCRIPT_DIR"
 PYTHON_BIN="${PYTHON_BIN:-$SCRIPT_DIR/.venv-qwen3-ctc/bin/python}"
 DATA_ROOT="${DATA_ROOT:-/data2/xintong/mandarin_accent}"
 SPLIT_DIR="${SPLIT_DIR:-data/jsonl_actual_split}"
-EXP_DIR="${EXP_DIR:-/data2/xintong/checkpoints/qwen3_asr_ctc_actual_tonecontrast_finalbucket_acoustic}"
+EXP_DIR="${EXP_DIR:-/data2/xintong/checkpoints/qwen3_asr_ctc_actual_finalbucket_mfa}"
+MFA_ALIGNMENT_DIR="${MFA_ALIGNMENT_DIR:-/data1/xintong/checkpoints/mfa}"
 export PYTHONUNBUFFERED=1
 export HF_HOME="${HF_HOME:-$SCRIPT_DIR/.cache-qwen3/huggingface}"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
@@ -62,6 +63,7 @@ CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}" \
   --tone-contrastive \
   --tone-acoustic-only \
   --final-bucket-sampling \
+  --mfa-alignment-dir "$MFA_ALIGNMENT_DIR" \
   --tone-start-step "$TONE_START_STEP" \
   --tone-ramp-steps "$TONE_RAMP_STEPS" \
   --tone-loss-weight "$TONE_LOSS_WEIGHT" \
