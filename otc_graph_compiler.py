@@ -71,7 +71,8 @@ class OtcTrainingGraphCompiler(object):
         self.self_loop_weight_decay = self_loop_weight_decay
 
     def get_max_token_id(self):
-        return len(self.token_table)
+        # k2.ctc_topo expects the largest symbol ID, not the symbol count.
+        return len(self.token_table) - 1
 
     def make_arc(
         self,

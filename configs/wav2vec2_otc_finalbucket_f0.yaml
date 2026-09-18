@@ -1,0 +1,201 @@
+# Authoritative configuration for Wav2Vec2 + k2 OTC + FinalBucket + F0.
+# The training launcher and Python trainer both consume this file. A copy is
+# saved under training.exp_dir for experiment reconstruction.
+
+data:
+  train_path: data/jsonl_actual_split/train.jsonl
+  val_path: data/jsonl_actual_split/dev.jsonl
+  test_manifests:
+    - test_seen.jsonl
+    - test_unseen.jsonl
+  data_root: /data2/xintong/mandarin_accent
+  audio_field: l2_wav
+  sample_rate: 16000
+  train_filter_seconds: [0.3, 20.0]
+  split:
+    enabled: false
+    method: source_stratified
+    input_manifest: train.jsonl
+    output_dir: data/jsonl_actual_split
+    dev_ratio: 0.03
+    seed: 42
+  vocabulary:
+    type: actual_phone
+    token_table_path: data/lang_jsonl/tokens.txt
+    ctc_vocab: 188
+    blank_id: 0
+    silence_labels: [sil, null]
+    tone_representation: tonal_final_as_one_phone
+  specaugment:
+    enabled: true
+    mask_time_prob: 0.65
+    mask_time_length: 10
+    mask_feature_prob: 0.25
+    mask_feature_length: 64
+  f0:
+    enabled: true
+    method: world_harvest_stonemask
+    cache_dir: /data2/xintong/f0_cache_world
+    f0_cache_dir: /data2/xintong/f0_cache_world
+    extraction_jobs: 32
+    frame_period_ms: 20.0
+    floor_hz: 60.0
+    ceil_hz: 600.0
+    input_domain: log_f0
+    input_features: [log_f0_contour, delta_log_f0, voiced_flag]
+    normalization:
+      enabled: true
+      method: per_utterance_voiced_mean_std
+      statistics_source: voiced_frames_only
+      applied_to: log_f0_contour
+    interpolation:
+      enabled: true
+      method: linear
+      applied_to: unvoiced_gaps_in_log_f0_contour
+    target:
+      representation: log_f0_contour
+      is_log: true
+      uses_normalized_contour: true
+    loss_mask: voiced_frames_only
+    encoder_time_alignment:
+      contour_method: linear
+      voiced_flag_method: nearest
+
+model:
+  audio_encoder:
+    architecture: wav2vec2_large_24layer_transformer
+    model_name: TencentGameMate/chinese-wav2vec2-large
+    pretrained: true
+    hidden_size: 1024
+    transformer_layers: 24
+    attention_heads: 16
+    intermediate_size: 4096
+    activation: gelu
+    convolutional_feature_encoder_frozen: true
+    layerdrop: 0.1
+    hidden_dropout: 0.1
+    attention_dropout: 0.1
+    activation_dropout: 0.0
+    feature_projection_dropout: 0.1
+    final_dropout: 0.0
+    feature_extractor_normalization: layer
+    stable_layer_norm: true
+    layer_norm_epsilon: 1.0e-5
+    initializer_range: 0.02
+  f0_encoder:
+    architecture: conv1d_gelu_layernorm_x3
+    input_dim: 3
+    hidden_dim: 128
+    f0_dim: 256
+    output_dim: 256
+    conv_layers: 3
+    kernel_size: 5
+    padding: 2
+    activation: gelu
+    layer_norm_after_each_conv: true
+    dropout: 0.0
+  f0_fusion:
+    architecture: concat_linear_layernorm
+    acoustic_source: wav2vec2_encoder_output
+    f0_source: f0_encoder_output
+    output_dim: 1024
+    initialization:
+      acoustic_path: identity
+      f0_weight: zeros
+      bias: zeros
+      note: initial_output_is_layernorm_acoustic
+    layer_norm: true
+    dropout: 0.0
+  ctc_otc_head:
+    architecture: linear
+    input_dim: 1024
+    output_dim: 188
+    activation: null
+    layer_norm: false
+    dropout: 0.0
+    initialization: normal_with_wav2vec2_initializer_range
+  f0_prediction_head:
+    architecture: linear_gelu_layernorm_linear
+    input_source: wav2vec2_acoustic_hidden_before_f0_fusion
+    input_dim: 1024
+    hidden_dim: 1024
+    output_dim: 1
+    output_target: normalized_log_f0_on_voiced_frames
+    dropout: 0.0
+  otc:
+    otc_token_table_path: data/lang_jsonl/tokens_otc.txt
+    otc_token: <star>
+    otc_token_id: 188
+    otc_probability: mean_nonblank_probability
+    allow_bypass_arc: true
+    allow_self_loop_arc: true
+    initial_bypass_weight: 0.0
+    initial_self_loop_weight: 0.0
+    bypass_weight_decay: 1.0
+    self_loop_weight_decay: 1.0
+    otc_beam_size: 10.0
+    reduction: mean
+    use_double_scores: true
+    dense_fsa_dtype: float32
+    sort_batch_by_output_length: descending
+
+training:
+  exp_dir: /data2/xintong/checkpoints/wav2vec2_large_actual_otc_finalbucket_f0
+  resume_from_checkpoint: null
+  seed: 42
+  devices: 4
+  strategy: ddp_find_unused_parameters_true
+  precision: 16-mixed
+  workers: 8
+  batch_size: 4
+  gradient_accumulation_steps: 3
+  effective_global_batch_size: 48
+  max_steps: 30000
+  eval_steps: 1000
+  gradient_clip:
+    value: 1.0
+    algorithm: norm
+  optimizer:
+    name: adamw
+    learning_rate: 5.0e-5
+    betas: [0.9, 0.98]
+    adam_epsilon: 1.0e-8
+    weight_decay: 0.0
+  scheduler:
+    name: per_parameter_group_linear
+    interval: step
+    freeze_backbone_steps: 10000
+    backbone_ramp_steps: 3000
+    head_warmup_steps: 3000
+    decay_to_zero_at_step: 30000
+  loss_weights:
+    otc: 1.0
+    f0_loss_weight: 0.05
+    tone_maximum: 0.05
+  checkpointing:
+    monitor: val/per
+    mode: min
+    save_top_k: 2
+    save_last: true
+    save_on_train_epoch_end: false
+
+contrastive_learning:
+  tone_contrastive: true
+  tone_acoustic_only: true
+  objective: supervised_contrastive_tonal_final
+  alignment_before_start: ctc_occurrence_posterior
+  alignment_after_start: ctc_occurrence_posterior
+  mfa_alignment_dir: null
+  positive_definition: same_tonal_phone_different_speaker
+  negative_definition: same_final_base_different_tone
+  sampler:
+    final_bucket_sampling: true
+    pool_batches: 32
+    groups_by: randomly_selected_tonal_final_base
+    length_locality: true
+  tone_loss_weight: 0.05
+  tone_temperature: 0.1
+  tone_start_step: 10000
+  tone_ramp_steps: 2000
+  tone_cross_accent_weight: 2.0
+  embedding_source: acoustic_hidden_only

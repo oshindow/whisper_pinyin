@@ -102,10 +102,14 @@ class PhoneTable:
 
 class QwenCTCDataset(Dataset):
     def __init__(self, manifest: str, data_root: str, audio_field: str = "l2_wav",
-                 f0_cache_dir: str | None = None):
+                 f0_cache_dir: str | None = None,
+                 f0_normalization_enabled: bool = True,
+                 f0_interpolation_enabled: bool = True):
         self.audio_field = audio_field
         self.data_root = data_root
         self.f0_cache_dir = f0_cache_dir
+        self.f0_normalization_enabled = f0_normalization_enabled
+        self.f0_interpolation_enabled = f0_interpolation_enabled
         self.rows = []
         for line in Path(manifest).read_text(encoding="utf-8").splitlines():
             if line.strip():
@@ -148,7 +152,11 @@ class QwenCTCDataset(Dataset):
         if not path.is_file():
             raise FileNotFoundError(f"missing F0 cache for {row[self.audio_field]} at {path}")
         raw_f0 = np.load(path)
-        return row, waveform.numpy(), f0_to_features(raw_f0, len(raw_f0))
+        return row, waveform.numpy(), f0_to_features(
+            raw_f0, len(raw_f0),
+            normalize=self.f0_normalization_enabled,
+            interpolate=self.f0_interpolation_enabled,
+        )
 
 
 class QwenCollator:
@@ -563,7 +571,8 @@ class Qwen3CTCModule(LightningModule):
             f0_loss = f0_error / f0_count.clamp_min(1)
         loss = ctc_loss + tone_weight * tone_loss + self.f0_loss_weight * f0_loss
         self.log("train/loss", loss, on_step=True, prog_bar=True, logger=True)
-        self.log("train/ctc_loss", ctc_loss, on_step=True, prog_bar=True, logger=True)
+        self.log(f"train/{getattr(self, 'loss_name', 'ctc')}_loss", ctc_loss,
+                 on_step=True, prog_bar=True, logger=True)
         if self.use_f0:
             self.log("train/f0_loss", f0_loss, on_step=True, prog_bar=True,
                      logger=True, sync_dist=True)

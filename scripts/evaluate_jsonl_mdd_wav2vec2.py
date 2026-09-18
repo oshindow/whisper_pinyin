@@ -31,7 +31,9 @@ def main():
     parser.add_argument("--num-workers", type=int, default=4)
     args = parser.parse_args()
 
-    checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=True, mmap=True)
+    # The training environment uses PyTorch 2.0, which supports weights_only
+    # but predates torch.load(..., mmap=True).
+    checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=True)
     model_args = argparse.Namespace(**checkpoint["hyper_parameters"])
     model = Wav2Vec2CTCModule(model_args)
     model.load_state_dict(checkpoint["state_dict"], strict=True)
@@ -47,7 +49,11 @@ def main():
 
     for manifest in args.manifests:
         dataset = QwenCTCDataset(
-            manifest, args.data_root, f0_cache_dir=model_args.f0_cache_dir
+            manifest, args.data_root, f0_cache_dir=model_args.f0_cache_dir,
+            f0_normalization_enabled=getattr(
+                model_args, "f0_normalization_enabled", True),
+            f0_interpolation_enabled=getattr(
+                model_args, "f0_interpolation_enabled", True),
         )
         loader = DataLoader(
             dataset, batch_size=args.batch_size, num_workers=args.num_workers,

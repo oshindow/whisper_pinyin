@@ -19,3 +19,5 @@ lightning_utilities
 torchmetrics
 einops
 tensorboard
+pyworld==0.3.5
+PyYAML==6.0.3

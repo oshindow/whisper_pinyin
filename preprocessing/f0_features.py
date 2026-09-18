@@ -30,7 +30,7 @@ def extract_f0(audio, sample_rate, frame_period=FRAME_PERIOD_MS,
     return pyworld.stonemask(x, f0, times, sample_rate).astype(np.float32)
 
 
-def f0_to_features(f0, n_frames):
+def f0_to_features(f0, n_frames, normalize=True, interpolate=True):
     """Return (3, n_frames): normalised log F0, its delta, and a voiced flag.
 
     Unvoiced frames are interpolated over so the delta stays meaningful across
@@ -46,8 +46,17 @@ def f0_to_features(f0, n_frames):
     log_f0 = np.zeros_like(f0, dtype=np.float32)
     log_f0[voiced] = np.log(f0[voiced])
     index = np.arange(len(f0), dtype=np.float32)
-    contour = np.interp(index, index[voiced], log_f0[voiced]).astype(np.float32)
-    contour = (contour - log_f0[voiced].mean()) / (log_f0[voiced].std() + 1e-5)
+    if interpolate:
+        contour = np.interp(index, index[voiced], log_f0[voiced]).astype(np.float32)
+    else:
+        contour = log_f0.copy()
+    if normalize:
+        mean = log_f0[voiced].mean()
+        scale = log_f0[voiced].std() + 1e-5
+        if interpolate:
+            contour = (contour - mean) / scale
+        else:
+            contour[voiced] = (contour[voiced] - mean) / scale
     delta = np.gradient(contour).astype(np.float32) if len(contour) > 1 else np.zeros_like(contour)
 
     length = min(len(f0), n_frames)
